@@ -34,6 +34,7 @@ import argparse
 import dataclasses
 import gc
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -54,13 +55,6 @@ elif torch.backends.mps.is_available():
 else:
     DEVICE_KIND = "cpu"
 
-# On this stack (transformers 5.14 / accelerate 1.14 / torch 2.13), loading a
-# plain fp16 model with device_map={"":"mps"} segfaults inside accelerate's
-# meta-device weight dispatch. bitsandbytes NF4 loading with the same
-# device_map is unaffected (different weight-loading path), so only the FP16
-# baseline needs the cpu-load-then-.to("mps") workaround below.
-MPS_FP16_DEVICE_MAP_SEGFAULTS = True
-
 
 def sync_device():
     if DEVICE_KIND == "cuda":
@@ -69,21 +63,52 @@ def sync_device():
         torch.mps.synchronize()
 
 
-def reset_peak_memory():
-    if DEVICE_KIND == "cuda":
-        torch.cuda.reset_peak_memory_stats()
-    sync_device()
+class PeakMemoryTracker:
+    """Tracks peak allocated device memory across a `with` block.
 
+    On CUDA this just wraps torch.cuda's built-in reset/max_memory_allocated
+    counters (exact). torch.mps exposes no equivalent reset-able peak counter
+    -- current_allocated_memory() sampled *after* the block would only see
+    whatever survives once the block's local tensors (e.g. generate()'s
+    internal KV cache) have already been freed by Python refcounting, not the
+    actual peak reached mid-generation. So on MPS a background thread polls
+    current_allocated_memory() while the block runs and keeps the max.
+    """
 
-def peak_memory_gb():
-    if DEVICE_KIND == "cuda":
-        return torch.cuda.max_memory_allocated() / (1024 ** 3)
-    if DEVICE_KIND == "mps":
-        # torch.mps exposes no reset-able peak counter; current_allocated_memory()
-        # sampled right after generation is a close proxy since KV-cache/activation
-        # memory grows ~monotonically during autoregressive decoding.
-        return torch.mps.current_allocated_memory() / (1024 ** 3)
-    return None
+    def __init__(self, poll_interval_s=0.02):
+        self.poll_interval_s = poll_interval_s
+        self._peak_bytes = 0
+        self._stop_event = None
+        self._thread = None
+
+    def __enter__(self):
+        if DEVICE_KIND == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+        elif DEVICE_KIND == "mps":
+            self._peak_bytes = torch.mps.current_allocated_memory()
+            self._stop_event = threading.Event()
+            self._thread = threading.Thread(target=self._poll, daemon=True)
+            self._thread.start()
+        sync_device()
+        return self
+
+    def _poll(self):
+        while not self._stop_event.is_set():
+            self._peak_bytes = max(self._peak_bytes, torch.mps.current_allocated_memory())
+            self._stop_event.wait(self.poll_interval_s)
+
+    def __exit__(self, *exc_info):
+        sync_device()
+        if DEVICE_KIND == "mps":
+            self._stop_event.set()
+            self._thread.join()
+
+    def peak_gb(self):
+        if DEVICE_KIND == "cuda":
+            return torch.cuda.max_memory_allocated() / (1024 ** 3)
+        if DEVICE_KIND == "mps":
+            return self._peak_bytes / (1024 ** 3)
+        return None
 
 
 def empty_cache():
@@ -104,7 +129,10 @@ def load_causal_lm(model_id, dtype=None, quantization_config=None):
             model_id, quantization_config=quantization_config, device_map=device_map
         )
 
-    if DEVICE_KIND == "mps" and MPS_FP16_DEVICE_MAP_SEGFAULTS:
+    if DEVICE_KIND == "mps":
+        # On this stack (transformers 5.14 / accelerate 1.14 / torch 2.13),
+        # loading fp16 weights with device_map={"":"mps"} segfaults inside
+        # accelerate's meta-device weight dispatch; load on CPU then move.
         model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
         return model.to("mps")
 
@@ -141,19 +169,31 @@ def log_result(result: BenchmarkResult, path: Path = RESULTS_DIR / "results.json
     )
 
 
+FILLER_TEXT = (
+    "Large language models compress statistical patterns of language "
+    "into billions of parameters, and quantization reduces the numerical "
+    "precision of those parameters to save memory and increase speed. "
+)
+
+
+def build_long_prompt(target_tokens: int, tokenize, decode) -> str:
+    """Build a prompt of exactly `target_tokens` tokens by repeating
+    FILLER_TEXT, using the given tokenize/decode callables. Shared by the HF
+    and GGUF paths so both context sweeps grow from the identical text --
+    tweaking the filler in only one place would silently break the
+    apples-to-apples comparison between backends."""
+    text = FILLER_TEXT
+    while len(tokenize(text)) < target_tokens:
+        text += FILLER_TEXT
+    return decode(tokenize(text)[:target_tokens])
+
+
 def make_long_prompt(tokenizer, target_tokens: int) -> str:
-    """Build a prompt of approximately `target_tokens` tokens by repeating a
-    filler passage, so we can test behavior at growing context lengths."""
-    filler = (
-        "Large language models compress statistical patterns of language "
-        "into billions of parameters, and quantization reduces the numerical "
-        "precision of those parameters to save memory and increase speed. "
+    return build_long_prompt(
+        target_tokens,
+        tokenize=lambda t: tokenizer(t).input_ids,
+        decode=tokenizer.decode,
     )
-    text = filler
-    while len(tokenizer(text).input_ids) < target_tokens:
-        text += filler
-    ids = tokenizer(text).input_ids[:target_tokens]
-    return tokenizer.decode(ids)
 
 
 def build_chat_input_ids(tokenizer, model, prompt: str):
@@ -178,27 +218,26 @@ def measure_hf_generate(model, tokenizer, prompt: str, max_new_tokens=MAX_NEW_TO
     input_ids = build_chat_input_ids(tokenizer, model, prompt)
     attention_mask = torch.ones_like(input_ids)
 
-    reset_peak_memory()
+    with PeakMemoryTracker() as mem:
+        start = time.time()
+        with torch.no_grad():
+            _ = model.generate(
+                input_ids=input_ids, attention_mask=attention_mask,
+                max_new_tokens=1, do_sample=False,
+            )
+        sync_device()
+        ttft = time.time() - start
 
-    start = time.time()
-    with torch.no_grad():
-        _ = model.generate(
-            input_ids=input_ids, attention_mask=attention_mask,
-            max_new_tokens=1, do_sample=False,
-        )
-    sync_device()
-    ttft = time.time() - start
+        start2 = time.time()
+        with torch.no_grad():
+            out = model.generate(
+                input_ids=input_ids, attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens, do_sample=False,
+            )
+        sync_device()
+        gen_time = time.time() - start2
 
-    start2 = time.time()
-    with torch.no_grad():
-        out = model.generate(
-            input_ids=input_ids, attention_mask=attention_mask,
-            max_new_tokens=max_new_tokens, do_sample=False,
-        )
-    sync_device()
-    gen_time = time.time() - start2
-
-    vram = peak_memory_gb()
+    vram = mem.peak_gb()
 
     n_new = out.shape[1] - input_ids.shape[1]
     tps = n_new / gen_time if gen_time > 0 else float("nan")
@@ -238,7 +277,16 @@ def run_nf4(context_sweep=False):
         bnb_4bit_use_double_quant=True,
         bnb_4bit_compute_dtype=torch.float16,
     )
-    model = load_causal_lm(MODEL_ID, quantization_config=bnb_config)
+    try:
+        model = load_causal_lm(MODEL_ID, quantization_config=bnb_config)
+    except Exception as e:
+        # bitsandbytes' Apple Silicon/MPS support is version-dependent; on a
+        # build without working MPS 4-bit kernels this fails at load time.
+        print(
+            f"[NF4] bitsandbytes 4-bit failed to load on {DEVICE_KIND} "
+            f"({e!r}). Skipping this stage."
+        )
+        return
 
     for ctx_len in (CONTEXT_LENGTHS if context_sweep else [None]):
         prompt = make_long_prompt(tokenizer, ctx_len) if ctx_len else PROMPT
@@ -271,20 +319,14 @@ def download_gguf() -> str:
 
 
 def make_long_prompt_gguf(llm, target_tokens: int) -> str:
-    """Build a prompt of exactly `target_tokens` tokens using llama.cpp's own
-    tokenizer, mirroring make_long_prompt's approach for the HF path. The
-    original word-repetition approximation underestimated token count badly
-    enough to exceed the allocated n_ctx and crash at ctx_len=4096."""
-    filler = (
-        "Large language models compress statistical patterns of language "
-        "into billions of parameters, and quantization reduces the numerical "
-        "precision of those parameters to save memory and increase speed. "
+    """GGUF counterpart of make_long_prompt, using llama.cpp's own tokenizer.
+    The original word-repetition approximation underestimated token count
+    badly enough to exceed the allocated n_ctx and crash at ctx_len=4096."""
+    return build_long_prompt(
+        target_tokens,
+        tokenize=lambda t: llm.tokenize(t.encode("utf-8")),
+        decode=lambda ids: llm.detokenize(ids).decode("utf-8", errors="ignore"),
     )
-    text = filler
-    while len(llm.tokenize(text.encode("utf-8"))) < target_tokens:
-        text += filler
-    ids = llm.tokenize(text.encode("utf-8"))[:target_tokens]
-    return llm.detokenize(ids).decode("utf-8", errors="ignore")
 
 
 def run_gguf(context_sweep=False):
@@ -377,12 +419,20 @@ def run_perplexity():
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.float16,
         )
-        model_nf4 = load_causal_lm(MODEL_ID, quantization_config=bnb_config)
-        ppl_nf4 = compute_ppl(model_nf4)
-        log_result(BenchmarkResult("NF4_4bit", None, None, 0.0, 0.0, perplexity=ppl_nf4))
-        del model_nf4
-        gc.collect()
-        empty_cache()
+        try:
+            model_nf4 = load_causal_lm(MODEL_ID, quantization_config=bnb_config)
+        except Exception as e:
+            model_nf4 = None
+            print(
+                f"[NF4] perplexity: bitsandbytes 4-bit failed to load on "
+                f"{DEVICE_KIND} ({e!r}). Skipping NF4 perplexity."
+            )
+        if model_nf4 is not None:
+            ppl_nf4 = compute_ppl(model_nf4)
+            log_result(BenchmarkResult("NF4_4bit", None, None, 0.0, 0.0, perplexity=ppl_nf4))
+            del model_nf4
+            gc.collect()
+            empty_cache()
 
 
 def main():
