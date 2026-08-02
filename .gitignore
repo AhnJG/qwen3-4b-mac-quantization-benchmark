@@ -5,7 +5,6 @@ __pycache__/
 .ipynb_checkpoints/
 .DS_Store
 
-# model/dataset caches and generated results
-results/*.jsonl
+# model/dataset caches
 *.gguf
 .cache/
