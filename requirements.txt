@@ -1,0 +1,14 @@
+torch>=2.3
+transformers>=4.45
+accelerate>=0.34
+datasets>=2.20
+sentencepiece
+huggingface_hub
+bitsandbytes>=0.44
+numpy
+pandas
+matplotlib
+tqdm
+
+# llama-cpp-python is installed separately with CUDA support -- see README.md
+# (a plain `pip install llama-cpp-python` here would give a CPU-only build)

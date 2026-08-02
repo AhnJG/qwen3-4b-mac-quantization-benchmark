@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+
+# model/dataset caches and generated results
+results/*.jsonl
+*.gguf
+.cache/
