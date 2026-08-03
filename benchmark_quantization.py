@@ -44,6 +44,12 @@ import torch
 MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 GGUF_REPO = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
 GGUF_FILENAME_HINT = "Q4_K_M"  # script globs for a file containing this substring
+# F16 GGUF isolates the *engine* effect (llama.cpp vs HF transformers) from
+# the *quantization* effect: GGUF-F16 vs HF-FP16 is same precision, different
+# engine; GGUF-Q4_K_M vs GGUF-F16 is same engine, different precision. Without
+# this, "GGUF is Nx faster" conflates both (an external review's main design
+# critique -- see notes/).
+GGUF_F16_FILENAME_HINT = "-F16"
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
@@ -152,6 +158,9 @@ class BenchmarkResult:
     ttft_s: float
     tokens_per_sec: float
     perplexity: Optional[float] = None
+    device: Optional[str] = None
+    prompt_tokens: Optional[int] = None
+    n_new: Optional[int] = None
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -196,52 +205,83 @@ def make_long_prompt(tokenizer, target_tokens: int) -> str:
     )
 
 
-def build_chat_input_ids(tokenizer, model, prompt: str):
-    """Use the model's chat template (this is an *Instruct* model, so raw
-    continuation would be an unfair/unrealistic test). enable_thinking=False
+def build_chat_prompt_string(tokenizer, prompt: str) -> str:
+    """Render `prompt` through the model's chat template as a plain string
+    (this is an *Instruct* model, so raw continuation would be an unfair/
+    unrealistic test -- and an unrealistic OOD input for the model, per the
+    review that flagged the GGUF path skipping this). enable_thinking=False
     keeps output length comparable across configs; if your tokenizer's
-    template doesn't recognize the kwarg it is silently ignored by Jinja."""
+    template doesn't recognize the kwarg it is silently ignored by Jinja.
+    Both the HF and GGUF paths render through *this same* HF tokenizer call,
+    so the two backends see byte-identical prompts -- not just "close enough"
+    templates from two different Jinja engines."""
     messages = [{"role": "user", "content": prompt}]
-    encoded = tokenizer.apply_chat_template(
+    return tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
-        return_tensors="pt",
+        tokenize=False,
         enable_thinking=False,
     )
-    # transformers>=5 returns a BatchEncoding (dict-like) here instead of a
-    # bare tensor; older versions returned the input_ids tensor directly.
-    input_ids = encoded["input_ids"] if hasattr(encoded, "keys") else encoded
-    return input_ids.to(model.device)
+
+
+def build_chat_input_ids(tokenizer, model, prompt: str):
+    text = build_chat_prompt_string(tokenizer, prompt)
+    encoded = tokenizer(text, return_tensors="pt", add_special_tokens=False)
+    return encoded["input_ids"].to(model.device)
+
+
+def warmup_hf_generate(model, tokenizer):
+    """One untimed generate() call to pay CUDA/MPS one-time costs (context
+    init, cuBLAS handle creation, kernel autotune, lazy module init) before
+    any timed measurement. Without this, whichever config/context-length
+    happens to run first absorbs the whole cost, producing a non-monotonic
+    TTFT that looks like a real effect but isn't (caught by external review:
+    TTFT at ctx=128 was *longer* than at ctx=512)."""
+    ids = tokenizer("Warm up.", return_tensors="pt").input_ids.to(model.device)
+    with torch.no_grad():
+        model.generate(input_ids=ids, max_new_tokens=4, do_sample=False)
+    sync_device()
 
 
 def measure_hf_generate(model, tokenizer, prompt: str, max_new_tokens=MAX_NEW_TOKENS):
+    """Time a *single* generate() call, using a logits processor to stamp a
+    timestamp on every decoding step (including the first). This replaces an
+    earlier two-call design (one generate(max_new_tokens=1) for TTFT, then a
+    second *independent* generate(max_new_tokens=150) for throughput) that an
+    external review caught: the second call didn't reuse the first call's KV
+    cache, so it silently re-ran the full O(context) prefill and folded that
+    time into what was reported as decode throughput. That made tok/s crash
+    with context length far faster than real decoding does, and made the
+    (single-call, prefix-cache-reusing) GGUF path look artificially more
+    robust to context growth by comparison -- not because it in fact was."""
+    from transformers import LogitsProcessorList
+
     input_ids = build_chat_input_ids(tokenizer, model, prompt)
     attention_mask = torch.ones_like(input_ids)
+
+    timestamps = []
+
+    def _stamp(_input_ids, scores):
+        timestamps.append(time.time())
+        return scores
 
     with PeakMemoryTracker() as mem:
         start = time.time()
         with torch.no_grad():
-            _ = model.generate(
-                input_ids=input_ids, attention_mask=attention_mask,
-                max_new_tokens=1, do_sample=False,
-            )
-        sync_device()
-        ttft = time.time() - start
-
-        start2 = time.time()
-        with torch.no_grad():
             out = model.generate(
                 input_ids=input_ids, attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens, do_sample=False,
+                logits_processor=LogitsProcessorList([_stamp]),
             )
         sync_device()
-        gen_time = time.time() - start2
 
     vram = mem.peak_gb()
 
-    n_new = out.shape[1] - input_ids.shape[1]
-    tps = n_new / gen_time if gen_time > 0 else float("nan")
-    return ttft, tps, vram
+    n_new = len(timestamps)
+    ttft = timestamps[0] - start
+    decode_time = timestamps[-1] - timestamps[0] if n_new > 1 else float("nan")
+    tps = (n_new - 1) / decode_time if n_new > 1 and decode_time > 0 else float("nan")
+    return ttft, tps, vram, input_ids.shape[1], n_new
 
 
 def run_fp16(context_sweep=False):
@@ -249,11 +289,15 @@ def run_fp16(context_sweep=False):
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     model = load_causal_lm(MODEL_ID, dtype=torch.float16)
+    warmup_hf_generate(model, tokenizer)
 
     for ctx_len in (CONTEXT_LENGTHS if context_sweep else [None]):
         prompt = make_long_prompt(tokenizer, ctx_len) if ctx_len else PROMPT
-        ttft, tps, vram = measure_hf_generate(model, tokenizer, prompt)
-        log_result(BenchmarkResult("FP16", ctx_len, vram, ttft, tps))
+        ttft, tps, vram, prompt_tokens, n_new = measure_hf_generate(model, tokenizer, prompt)
+        log_result(BenchmarkResult(
+            "FP16", ctx_len, vram, ttft, tps,
+            device=DEVICE_KIND, prompt_tokens=prompt_tokens, n_new=n_new,
+        ))
 
     del model
     gc.collect()
@@ -288,30 +332,33 @@ def run_nf4(context_sweep=False):
         )
         return
 
+    warmup_hf_generate(model, tokenizer)
+
     for ctx_len in (CONTEXT_LENGTHS if context_sweep else [None]):
         prompt = make_long_prompt(tokenizer, ctx_len) if ctx_len else PROMPT
-        ttft, tps, vram = measure_hf_generate(model, tokenizer, prompt)
-        log_result(BenchmarkResult("NF4_4bit", ctx_len, vram, ttft, tps))
+        ttft, tps, vram, prompt_tokens, n_new = measure_hf_generate(model, tokenizer, prompt)
+        log_result(BenchmarkResult(
+            "NF4_4bit", ctx_len, vram, ttft, tps,
+            device=DEVICE_KIND, prompt_tokens=prompt_tokens, n_new=n_new,
+        ))
 
     del model
     gc.collect()
     empty_cache()
 
 
-def download_gguf() -> str:
+def download_gguf(filename_hint: str) -> str:
     from huggingface_hub import list_repo_files, hf_hub_download
 
     files = list_repo_files(GGUF_REPO)
     candidates = [
         f for f in files
-        if GGUF_FILENAME_HINT.lower() in f.lower() and f.endswith(".gguf")
+        if filename_hint.lower() in f.lower() and f.endswith(".gguf")
     ]
     if not candidates:
         raise FileNotFoundError(
-            f"No file containing '{GGUF_FILENAME_HINT}' found in {GGUF_REPO}. "
-            f"Check https://huggingface.co/{GGUF_REPO} and update GGUF_REPO / "
-            f"GGUF_FILENAME_HINT at the top of this script to match an actual "
-            f"filename in that repo."
+            f"No file containing '{filename_hint}' found in {GGUF_REPO}. "
+            f"Check https://huggingface.co/{GGUF_REPO} for an actual filename."
         )
     local_path = hf_hub_download(GGUF_REPO, candidates[0])
     print(f"[GGUF] downloaded {candidates[0]}")
@@ -319,9 +366,11 @@ def download_gguf() -> str:
 
 
 def make_long_prompt_gguf(llm, target_tokens: int) -> str:
-    """GGUF counterpart of make_long_prompt, using llama.cpp's own tokenizer.
-    The original word-repetition approximation underestimated token count
-    badly enough to exceed the allocated n_ctx and crash at ctx_len=4096."""
+    """Build `target_tokens` worth of *filler content* using llama.cpp's own
+    tokenizer to count length (this is the inner text later wrapped in a chat
+    template -- see run_gguf). The original word-repetition approximation
+    underestimated token count badly enough to exceed the allocated n_ctx and
+    crash at ctx_len=4096."""
     return build_long_prompt(
         target_tokens,
         tokenize=lambda t: llm.tokenize(t.encode("utf-8")),
@@ -329,7 +378,7 @@ def make_long_prompt_gguf(llm, target_tokens: int) -> str:
     )
 
 
-def run_gguf(context_sweep=False):
+def run_gguf(config_name: str, filename_hint: str, context_sweep=False):
     try:
         from llama_cpp import Llama
     except ImportError:
@@ -339,28 +388,54 @@ def run_gguf(context_sweep=False):
         )
         return
 
-    model_path = download_gguf()
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    model_path = download_gguf(filename_hint)
 
     for ctx_len in (CONTEXT_LENGTHS if context_sweep else [None]):
-        n_ctx = max(4096, (ctx_len or 0) + MAX_NEW_TOKENS + 64)
+        n_ctx = (ctx_len or 0) + MAX_NEW_TOKENS + 64
         llm = Llama(model_path=model_path, n_gpu_layers=-1, n_ctx=n_ctx, verbose=False)
 
-        if ctx_len is None:
-            long_prompt = PROMPT
-        else:
-            long_prompt = make_long_prompt_gguf(llm, ctx_len)
+        filler = make_long_prompt_gguf(llm, ctx_len) if ctx_len else PROMPT
+        # Same HF tokenizer, same chat template, as the HF path -- so both
+        # backends see byte-identical formatted prompts (an external review
+        # caught the earlier version feeding GGUF a raw, un-templated string,
+        # which is an out-of-distribution input for an instruct model).
+        prompt_str = build_chat_prompt_string(tokenizer, filler)
+        # add_bos=False, special=True to match exactly what Llama.__call__
+        # itself does internally when tokenizing a plain (no-FIM-suffix)
+        # prompt -- otherwise this count wouldn't reflect what's actually fed
+        # to the model (and literal "<|im_start|>" etc. would be counted as
+        # ordinary text tokens instead of the single control token each is).
+        prompt_tokens = len(llm.tokenize(prompt_str.encode("utf-8"), add_bos=False, special=True))
 
+        # Untimed warmup on a throwaway prompt, then reset() so the timed
+        # call below is forced to do a full, fresh prefill instead of
+        # silently reusing the warmup's cached prefix (the mechanism behind
+        # the earlier double-call bug: two calls on the *same* prompt let
+        # llama.cpp's prefix-cache skip prefill on the second one entirely).
+        _ = list(llm("Warm up.", max_tokens=4, temperature=0.0))
+        llm.reset()
+
+        timestamps = []
+        n_new = 0
         start = time.time()
-        _ = llm(long_prompt, max_tokens=1)
-        ttft = time.time() - start
+        for _chunk in llm(
+            prompt_str, max_tokens=MAX_NEW_TOKENS, stream=True,
+            temperature=0.0, top_k=1, repeat_penalty=1.0,
+        ):
+            timestamps.append(time.time())
+            n_new += 1
 
-        start2 = time.time()
-        out = llm(long_prompt, max_tokens=MAX_NEW_TOKENS)
-        gen_time = time.time() - start2
-        n_new = out["usage"]["completion_tokens"]
-        tps = n_new / gen_time if gen_time > 0 else float("nan")
+        ttft = timestamps[0] - start
+        decode_time = timestamps[-1] - timestamps[0] if n_new > 1 else float("nan")
+        tps = (n_new - 1) / decode_time if n_new > 1 and decode_time > 0 else float("nan")
 
-        log_result(BenchmarkResult("GGUF_Q4_K_M", ctx_len, None, ttft, tps))
+        log_result(BenchmarkResult(
+            config_name, ctx_len, None, ttft, tps,
+            device=DEVICE_KIND, prompt_tokens=prompt_tokens, n_new=n_new,
+        ))
         del llm
         gc.collect()
 
@@ -439,7 +514,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--stage",
-        choices=["all", "fp16", "nf4", "gguf", "context_sweep", "perplexity"],
+        choices=["all", "fp16", "nf4", "gguf", "gguf_f16", "context_sweep", "perplexity"],
         default="all",
     )
     args = parser.parse_args()
@@ -450,11 +525,14 @@ def main():
         if args.stage in ("all", "nf4"):
             run_nf4()
         if args.stage in ("all", "gguf"):
-            run_gguf()
+            run_gguf("GGUF_Q4_K_M", GGUF_FILENAME_HINT)
+        if args.stage in ("all", "gguf_f16"):
+            run_gguf("GGUF_F16", GGUF_F16_FILENAME_HINT)
         if args.stage == "context_sweep":
             run_fp16(context_sweep=True)
             run_nf4(context_sweep=True)
-            run_gguf(context_sweep=True)
+            run_gguf("GGUF_Q4_K_M", GGUF_FILENAME_HINT, context_sweep=True)
+            run_gguf("GGUF_F16", GGUF_F16_FILENAME_HINT, context_sweep=True)
         if args.stage in ("all", "perplexity"):
             run_perplexity()
     except torch.cuda.OutOfMemoryError:

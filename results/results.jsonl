@@ -1,35 +1,26 @@
-{"config": "GGUF_Q4_K_M", "context_len": null, "peak_vram_gb": null, "ttft_s": 0.30609822273254395, "tokens_per_sec": 29.53612906733158, "perplexity": null}
-{"config": "FP16", "context_len": null, "peak_vram_gb": null, "ttft_s": 0.0, "tokens_per_sec": 0.0, "perplexity": 9.54128646850586}
-{"config": "NF4_4bit", "context_len": null, "peak_vram_gb": null, "ttft_s": 0.0, "tokens_per_sec": 0.0, "perplexity": 9.806031227111816}
-{"config": "FP16", "context_len": null, "peak_vram_gb": 7.528526544570923, "ttft_s": 0.328887939453125, "tokens_per_sec": 9.097177118895976, "perplexity": null}
-{"config": "NF4_4bit", "context_len": null, "peak_vram_gb": 2.898554801940918, "ttft_s": 0.6012358665466309, "tokens_per_sec": 3.3474715580115237, "perplexity": null}
-{"config": "FP16", "context_len": 128, "peak_vram_gb": 7.539037466049194, "ttft_s": 0.5482912063598633, "tokens_per_sec": 8.895108399844698, "perplexity": null}
-{"config": "FP16", "context_len": 512, "peak_vram_gb": 7.7502241134643555, "ttft_s": 1.6351189613342285, "tokens_per_sec": 7.995211404831055, "perplexity": null}
-{"config": "FP16", "context_len": 1024, "peak_vram_gb": 7.99038028717041, "ttft_s": 3.8575258255004883, "tokens_per_sec": 6.991865807692284, "perplexity": null}
-{"config": "FP16", "context_len": 2048, "peak_vram_gb": 8.101362228393555, "ttft_s": 6.841556072235107, "tokens_per_sec": 1.8683832166631738, "perplexity": null}
-{"config": "FP16", "context_len": 4096, "peak_vram_gb": 8.410355567932129, "ttft_s": 14.833221912384033, "tokens_per_sec": 0.2778636241960342, "perplexity": null}
-{"config": "NF4_4bit", "context_len": 128, "peak_vram_gb": 2.880650043487549, "ttft_s": 0.7503230571746826, "tokens_per_sec": 3.2900926081652506, "perplexity": null}
-{"config": "NF4_4bit", "context_len": 512, "peak_vram_gb": 3.110642671585083, "ttft_s": 2.0487520694732666, "tokens_per_sec": 2.982379637516631, "perplexity": null}
-{"config": "NF4_4bit", "context_len": 1024, "peak_vram_gb": 3.1667864322662354, "ttft_s": 4.1004979610443115, "tokens_per_sec": 2.8444359182354337, "perplexity": null}
-{"config": "NF4_4bit", "context_len": 2048, "peak_vram_gb": 3.302384614944458, "ttft_s": 8.337453126907349, "tokens_per_sec": 2.1132141178670842, "perplexity": null}
-{"config": "NF4_4bit", "context_len": 4096, "peak_vram_gb": 4.019385576248169, "ttft_s": 17.71509313583374, "tokens_per_sec": 0.09847180142712578, "perplexity": null}
-{"config": "GGUF_Q4_K_M", "context_len": 128, "peak_vram_gb": null, "ttft_s": 0.40320301055908203, "tokens_per_sec": 30.528186692606546, "perplexity": null}
-{"config": "GGUF_Q4_K_M", "context_len": 512, "peak_vram_gb": null, "ttft_s": 1.5673737525939941, "tokens_per_sec": 28.871059564971144, "perplexity": null}
-{"config": "GGUF_Q4_K_M", "context_len": 1024, "peak_vram_gb": null, "ttft_s": 3.462635040283203, "tokens_per_sec": 27.336266717972222, "perplexity": null}
-{"config": "GGUF_Q4_K_M", "context_len": 2048, "peak_vram_gb": null, "ttft_s": 7.676563024520874, "tokens_per_sec": 24.328113627837233, "perplexity": null}
-{"config": "GGUF_Q4_K_M", "context_len": 4096, "peak_vram_gb": null, "ttft_s": 17.582015991210938, "tokens_per_sec": 19.947872324100167, "perplexity": null}
-{"config": "FP16", "context_len": 128, "peak_vram_gb": 7.538838148117065, "ttft_s": 0.6508901119232178, "tokens_per_sec": 9.179704666926499, "perplexity": null}
-{"config": "FP16", "context_len": 512, "peak_vram_gb": 7.7511560916900635, "ttft_s": 1.6198270320892334, "tokens_per_sec": 8.16550061144018, "perplexity": null}
-{"config": "FP16", "context_len": 1024, "peak_vram_gb": 7.9903318881988525, "ttft_s": 3.2304728031158447, "tokens_per_sec": 7.115899730972659, "perplexity": null}
-{"config": "FP16", "context_len": 2048, "peak_vram_gb": 8.09999394416809, "ttft_s": 6.83466911315918, "tokens_per_sec": 3.9752640112829414, "perplexity": null}
-{"config": "FP16", "context_len": 4096, "peak_vram_gb": 8.326448678970337, "ttft_s": 13.949084043502808, "tokens_per_sec": 3.9224307537280683, "perplexity": null}
-{"config": "NF4_4bit", "context_len": 128, "peak_vram_gb": 2.880650043487549, "ttft_s": 0.9583728313446045, "tokens_per_sec": 3.4283510622254565, "perplexity": null}
-{"config": "NF4_4bit", "context_len": 512, "peak_vram_gb": 3.110642671585083, "ttft_s": 1.8988902568817139, "tokens_per_sec": 3.2828050711764494, "perplexity": null}
-{"config": "NF4_4bit", "context_len": 1024, "peak_vram_gb": 3.1682894229888916, "ttft_s": 3.552809000015259, "tokens_per_sec": 3.073103976590653, "perplexity": null}
-{"config": "NF4_4bit", "context_len": 2048, "peak_vram_gb": 3.302384614944458, "ttft_s": 7.540632963180542, "tokens_per_sec": 2.6322450808971993, "perplexity": null}
-{"config": "NF4_4bit", "context_len": 4096, "peak_vram_gb": 3.993112802505493, "ttft_s": 17.009340047836304, "tokens_per_sec": 1.6339131001726626, "perplexity": null}
-{"config": "GGUF_Q4_K_M", "context_len": 128, "peak_vram_gb": null, "ttft_s": 0.39337611198425293, "tokens_per_sec": 25.015759462138522, "perplexity": null}
-{"config": "GGUF_Q4_K_M", "context_len": 512, "peak_vram_gb": null, "ttft_s": 1.743718147277832, "tokens_per_sec": 22.599258729071877, "perplexity": null}
-{"config": "GGUF_Q4_K_M", "context_len": 1024, "peak_vram_gb": null, "ttft_s": 3.740677833557129, "tokens_per_sec": 21.21825935804629, "perplexity": null}
-{"config": "GGUF_Q4_K_M", "context_len": 2048, "peak_vram_gb": null, "ttft_s": 8.75218915939331, "tokens_per_sec": 18.290262610645016, "perplexity": null}
-{"config": "GGUF_Q4_K_M", "context_len": 4096, "peak_vram_gb": null, "ttft_s": 20.045110940933228, "tokens_per_sec": 14.819836846623827, "perplexity": null}
+{"config": "FP16", "context_len": null, "peak_vram_gb": 7.525604963302612, "ttft_s": 0.018141746520996094, "tokens_per_sec": 7.477956193828582, "perplexity": null, "device": "mps", "prompt_tokens": 23, "n_new": 120}
+{"config": "NF4_4bit", "context_len": null, "peak_vram_gb": 2.898319959640503, "ttft_s": 0.032869815826416016, "tokens_per_sec": 2.7672500499140114, "perplexity": null, "device": "mps", "prompt_tokens": 23, "n_new": 150}
+{"config": "GGUF_Q4_K_M", "context_len": null, "peak_vram_gb": null, "ttft_s": 0.13048195838928223, "tokens_per_sec": 24.84673232479209, "perplexity": null, "device": "mps", "prompt_tokens": 23, "n_new": 121}
+{"config": "GGUF_F16", "context_len": null, "peak_vram_gb": null, "ttft_s": 0.30719900131225586, "tokens_per_sec": 8.466489027003439, "perplexity": null, "device": "mps", "prompt_tokens": 23, "n_new": 120}
+{"config": "FP16", "context_len": null, "peak_vram_gb": null, "ttft_s": 0.0, "tokens_per_sec": 0.0, "perplexity": 9.54128646850586, "device": "mps", "prompt_tokens": null, "n_new": null}
+{"config": "NF4_4bit", "context_len": null, "peak_vram_gb": null, "ttft_s": 0.0, "tokens_per_sec": 0.0, "perplexity": 9.806031227111816, "device": "mps", "prompt_tokens": null, "n_new": null}
+{"config": "FP16", "context_len": 128, "peak_vram_gb": 7.5371973514556885, "ttft_s": 0.01978921890258789, "tokens_per_sec": 9.154603672108339, "perplexity": null, "device": "mps", "prompt_tokens": 136, "n_new": 150}
+{"config": "FP16", "context_len": 512, "peak_vram_gb": 7.740087032318115, "ttft_s": 0.014943838119506836, "tokens_per_sec": 8.23335467014288, "perplexity": null, "device": "mps", "prompt_tokens": 520, "n_new": 150}
+{"config": "FP16", "context_len": 1024, "peak_vram_gb": 7.9629597663879395, "ttft_s": 0.039852142333984375, "tokens_per_sec": 6.732277656501755, "perplexity": null, "device": "mps", "prompt_tokens": 1032, "n_new": 150}
+{"config": "FP16", "context_len": 2048, "peak_vram_gb": 8.07947301864624, "ttft_s": 0.05674600601196289, "tokens_per_sec": 2.5642485765885463, "perplexity": null, "device": "mps", "prompt_tokens": 2056, "n_new": 150}
+{"config": "FP16", "context_len": 4096, "peak_vram_gb": 8.32984972000122, "ttft_s": 0.03447294235229492, "tokens_per_sec": 4.036039305380831, "perplexity": null, "device": "mps", "prompt_tokens": 4104, "n_new": 150}
+{"config": "NF4_4bit", "context_len": 128, "peak_vram_gb": 2.877805709838867, "ttft_s": 0.03183889389038086, "tokens_per_sec": 3.4390617759264974, "perplexity": null, "device": "mps", "prompt_tokens": 136, "n_new": 150}
+{"config": "NF4_4bit", "context_len": 512, "peak_vram_gb": 3.1291918754577637, "ttft_s": 0.029912948608398438, "tokens_per_sec": 3.158684111354526, "perplexity": null, "device": "mps", "prompt_tokens": 520, "n_new": 150}
+{"config": "NF4_4bit", "context_len": 1024, "peak_vram_gb": 3.1680965423583984, "ttft_s": 0.030427932739257812, "tokens_per_sec": 2.2819855718488795, "perplexity": null, "device": "mps", "prompt_tokens": 1032, "n_new": 150}
+{"config": "NF4_4bit", "context_len": 2048, "peak_vram_gb": 3.296233654022217, "ttft_s": 0.038136959075927734, "tokens_per_sec": 2.4303638368646574, "perplexity": null, "device": "mps", "prompt_tokens": 2056, "n_new": 150}
+{"config": "NF4_4bit", "context_len": 4096, "peak_vram_gb": 3.9463295936584473, "ttft_s": 0.03249382972717285, "tokens_per_sec": 1.6221927784410193, "perplexity": null, "device": "mps", "prompt_tokens": 4104, "n_new": 150}
+{"config": "GGUF_Q4_K_M", "context_len": 128, "peak_vram_gb": null, "ttft_s": 0.4666929244995117, "tokens_per_sec": 31.271844218155184, "perplexity": null, "device": "mps", "prompt_tokens": 136, "n_new": 151}
+{"config": "GGUF_Q4_K_M", "context_len": 512, "peak_vram_gb": null, "ttft_s": 2.934001922607422, "tokens_per_sec": 23.51820796394181, "perplexity": null, "device": "mps", "prompt_tokens": 520, "n_new": 151}
+{"config": "GGUF_Q4_K_M", "context_len": 1024, "peak_vram_gb": null, "ttft_s": 4.268110036849976, "tokens_per_sec": 22.08796270111676, "perplexity": null, "device": "mps", "prompt_tokens": 1032, "n_new": 151}
+{"config": "GGUF_Q4_K_M", "context_len": 2048, "peak_vram_gb": null, "ttft_s": 8.831149816513062, "tokens_per_sec": 19.25253907927083, "perplexity": null, "device": "mps", "prompt_tokens": 2056, "n_new": 151}
+{"config": "GGUF_Q4_K_M", "context_len": 4096, "peak_vram_gb": null, "ttft_s": 20.67754602432251, "tokens_per_sec": 13.479488314119935, "perplexity": null, "device": "mps", "prompt_tokens": 4104, "n_new": 150}
+{"config": "GGUF_F16", "context_len": 128, "peak_vram_gb": null, "ttft_s": 0.4286348819732666, "tokens_per_sec": 9.249247794131223, "perplexity": null, "device": "mps", "prompt_tokens": 136, "n_new": 151}
+{"config": "GGUF_F16", "context_len": 512, "peak_vram_gb": null, "ttft_s": 2.0452888011932373, "tokens_per_sec": 9.252477531242018, "perplexity": null, "device": "mps", "prompt_tokens": 520, "n_new": 151}
+{"config": "GGUF_F16", "context_len": 1024, "peak_vram_gb": null, "ttft_s": 3.9302079677581787, "tokens_per_sec": 9.86862163418082, "perplexity": null, "device": "mps", "prompt_tokens": 1032, "n_new": 151}
+{"config": "GGUF_F16", "context_len": 2048, "peak_vram_gb": null, "ttft_s": 7.766006946563721, "tokens_per_sec": 9.614477497730922, "perplexity": null, "device": "mps", "prompt_tokens": 2056, "n_new": 150}
+{"config": "GGUF_F16", "context_len": 4096, "peak_vram_gb": null, "ttft_s": 19.024341106414795, "tokens_per_sec": 7.43992118068965, "perplexity": null, "device": "mps", "prompt_tokens": 4104, "n_new": 150}
