@@ -8,3 +8,6 @@ __pycache__/
 # model/dataset caches
 *.gguf
 .cache/
+
+# personal notes, not part of the tracked report
+notes/
