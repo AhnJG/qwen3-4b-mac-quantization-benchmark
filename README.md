@@ -4,7 +4,7 @@
 
 ## TL;DR
 
-> `Qwen3-4B-Instruct-2507`을 2×2 격자(HF/llama.cpp 엔진 × FP16/4-bit)로 비교했다. **엔진 vs 양자화 분리** (ctx=128, 3회 중앙값): 같은 정밀도에서 llama.cpp는 HF `generate()`보다 1.12배 빠른 데 그치지만(엔진 효과), 같은 llama.cpp 안에서 Q4_K_M 양자화는 2.89배를 더 낸다 — "GGUF가 빠르다"의 실체는 대부분 양자화지 엔진이 아니다. 반대로 **bitsandbytes NF4는 4-bit인데도 FP16보다 2.67배 느리다**(0.375배 속도) — VRAM은 62% 줄지만(7.53→2.88GB) 속도는 대가를 치른다. 품질 저하는 NF4 perplexity +2.8%로 미미. **컨텍스트 스케일링(128→4096)**: 저하폭 %로는 GGUF F16(-14%)이 가장 완만하지만, 이건 강건성이 아니라 착시다 — 토큰당 절대 지연 증가는 GGUF F16(+16ms)과 Q4_K_M(+18ms)이 거의 같고, F16이 baseline이 느려 같은 손해가 작은 %로 보일 뿐이다. HF 경로(FP16 -49%, NF4 -45%)는 절대 저하도 크고(각 +108ms/+249ms) 반복 간 변동이 극심한데(FP16 @4096이 1.48~4.71 tok/s), 이는 스왑 포화 상태에서 상주 메모리가 경쟁하기 때문이다 — GGUF(mmap)는 같은 조건에서 안정적이다(F16 @4096: 8.42~8.55). 자세한 내용은 [Results](#results), [Context-length scaling](#context-length-scaling) 참고.
+> `Qwen3-4B-Instruct-2507`을 2×2 격자(HF/llama.cpp 엔진 × FP16/4-bit)로 비교했다. **엔진 vs 양자화 분리** (ctx=128, 3회 중앙값): 같은 정밀도에서 llama.cpp는 HF `generate()`보다 1.12배 빠른 데 그치지만(엔진 효과), 같은 llama.cpp 안에서 Q4_K_M 양자화는 2.89배를 더 낸다 — "GGUF가 빠르다"의 실체는 대부분 양자화지 엔진이 아니다. 반대로 **bitsandbytes NF4는 4-bit인데도 FP16보다 2.67배 느리다**(0.375배 속도) — VRAM은 62% 줄지만(7.53→2.88GB) 속도는 대가를 치른다. 품질 저하는 NF4 perplexity +2.8%로 미미. **컨텍스트 스케일링(128→4096)**: 저하폭 %로는 GGUF F16(-14%)이 가장 완만하지만, 이건 강건성이 아니라 착시다 — 토큰당 절대 지연 증가는 GGUF F16(+16ms)과 Q4_K_M(+18ms)이 거의 같고, F16이 baseline이 느려 같은 손해가 작은 %로 보일 뿐이다. HF 경로(FP16 -49%, NF4 -45%)는 절대 저하도 크고(각 +108ms/+249ms) 반복 간 변동이 극심한데(FP16 @4096이 1.48~4.71 tok/s), 이는 스왑 포화 상태에서 상주 메모리가 경쟁하기 때문이다 — GGUF(mmap)는 같은 조건에서 안정적이다(F16 @4096: 8.42~8.55). **v4 통제 ballast 실험이 이를 직접 확인**: 같은 Q4_K_M에서 mmap을 끄면 장문 압박 저하가 −9%→−40%로 커진다(v2가 "반증"한 mmap 가설이 재확인됨). 자세한 내용은 [Results](#results), [Context-length scaling](#context-length-scaling), [Memory pressure](#memory-pressure-ballast-실험) 참고.
 
 ## What this is
 
@@ -98,7 +98,21 @@ v3에서 도구는 완전히 고쳤습니다:
 - `ballast.py` 순회 버그 수정(전 페이지를 매 주기 터치해 상주 유지 — 3GB 요청 시 RSS가 축소 없이 유지됨을 확인)
 - `pressure_probe.py`에 **GGUF F16 추가**(8GB 가중치로 압박에 가장 취약한 후보), **config 순서 무작위화**(순서 교락 제거), **매 측정 시점의 실제 스왑 사용량 기록**(압박이 실제로 걸렸는지 조작검증), 다단계 ballast(0/8/16GB 양성 대조), 그리고 v3의 수정된 측정 경로(`measure_one`) 사용
 
-**그러나 통제된 재실행은 보류했습니다.** 깨끗한 0GB 기준선은 재부팅이 필요한데(이 세션은 수 시간 벤치마크로 스왑이 8~18GB 누적), 재부팅은 사용자 조작입니다. 이미 압박된 머신에서 ballast를 더 얹으면 v2의 "압박 vs 더-압박" 문제를 그대로 반복할 뿐입니다. 대신 위 [Context-length scaling](#context-length-scaling)의 반복 spread가 같은 효과(HF는 장문에서 노이즈 지배, GGUF는 안정)를 ballast 없이 더 깨끗하게 보여주므로 이를 1차 근거로 삼았습니다. 재부팅 후 `tools/pressure_probe.py --ballast-gb 0,8,16` 실행이 남은 확정 단계입니다.
+**v4에서 재부팅 직후(스왑 0GB) `tools/pressure_probe.py --ballast-gb 0,8,16`을 실행했습니다**(`results/results_memory_pressure.jsonl`). 0→16GB ballast에서 decode tok/s 저하:
+
+| Config | ctx=128 | ctx=4096 |
+|---|---|---|
+| GGUF Q4_K_M **(mmap)** | 30.96 → 31.02 (+0.2%) | 20.89 → 18.96 (**−9.2%**) |
+| GGUF Q4_K_M **(nommap)** | 30.32 → 30.28 (−0.1%) | 20.74 → 12.49 (**−39.8%**) |
+| GGUF F16 (mmap) | 11.09 → 10.63 (−4.1%) | 9.39 → 8.14 (−13.4%) |
+| HF FP16 | 9.16 → 8.73 (−4.6%) | 2.44 → 0.97 (−60.4%) |
+| HF NF4 | 3.49 → 3.41 (−2.4%) | 2.38 → 0.47 (−80.5%) |
+
+- **단문(128)은 아무도 안 흔들립니다**(≤5%) — working set이 작아 압박은 장문에서만 뭅니다.
+- **장문(4096)에서 mmap 가설이 직접 확인됐습니다.** 같은 Q4_K_M 가중치·엔진에서 `use_mmap`만 끄면 저하가 **−9.2% → −39.8%로 4.3배** 커집니다. 0GB에선 둘 다 ~20.8 tok/s로 같으므로 이 격차는 압박이 있을 때만 열립니다. **v2의 버그 있던 ballast가 "반증"했던 v1 mmap 가설이, 고친 도구·깨끗한 baseline에서 오히려 재확인된 셈입니다.**
+- HF 상주 경로(FP16 −60%, NF4 −80%)와 nommap GGUF는 붕괴하고 mmap GGUF만 견딥니다 — [Context-length scaling](#context-length-scaling)의 반복 분산으로 자연히 드러났던 효과를 통제 실험이 격리했습니다.
+
+("0GB" 기준선도 8GB F16 가중치를 로딩하며 세션 스왑이 6~7GB로 오르지만, 매 측정의 스왑을 기록해 드러냈고, mmap A/B는 두 config의 스왑이 비슷해 공정합니다. 반복 1회라 셀별 신뢰구간은 아직 없습니다.)
 
 ## Related benchmarks (sanity check)
 
@@ -112,7 +126,7 @@ v3에서 도구는 완전히 고쳤습니다:
 - **측정 머신이 스왑 포화 상태였습니다** (8~18GB). HF(상주 메모리) 장문 수치는 반복 간 변동이 극심하므로(FP16 @4096: 1.48~4.71) 중앙값+범위로 보고했습니다. 깨끗한 측정은 재부팅이 필요하며, GGUF·단문 수치와 엔진/양자화 비율은 상대적으로 안정적입니다.
 - **3회 반복 기준**입니다. 변동이 큰 셀은 반복을 더 늘려야 신뢰구간이 좁아집니다.
 - **CUDA 교차검증은 v1 버그 방식으로 측정된 것이라 제외**했습니다(`results/results_cuda_t4_colab_v1_double_prefill_bug.jsonl`). C-1은 CUDA도 비동기라 동일하게 발현하므로, v3 프로토콜로 재측정해야 유효합니다.
-- **ballast 통제 실험은 도구만 완비**됐고 실행은 재부팅 후로 보류(위 참고).
+- **ballast 통제 실험은 v4에서 재부팅 후 실행 완료**([Memory pressure](#memory-pressure-ballast-실험)). 반복 1회이므로 셀별 신뢰구간은 아직 미확보이며, 컨텍스트 스윕 자체의 깨끗한 재측정은 별도 과제로 남습니다.
 - **MPS Peak VRAM은 20ms 폴링 근사**로 짧은 스파이크를 놓칠 수 있습니다. NF4의 절대 VRAM 증가가 FP16보다 큰 원인은 미규명이며, 폴링 노이즈일 가능성이 있습니다.
 - **GGUF 경로는 매 측정 워밍업 후 `llm.reset()`으로 캐시를 비워** 매번 완전한 prefill을 강제합니다 — 접두사가 재사용되는 실사용 멀티턴 대화보다 보수적(불리한) 조건입니다.
 - **속도 지표는 커널 프로파일링이 아닌 end-to-end 측정**입니다. NF4가 느린 원인(디퀀타이즈 커널 융합 부재)은 아키텍처 지식 기반 추정이며 직접 프로파일링은 안 했습니다.
@@ -122,7 +136,7 @@ v3에서 도구는 완전히 고쳤습니다:
 1. ~~C-1(async TTFT 누출)·M-1(GGUF 청크 카운트)·D-8 수정~~ (완료 — 실측 검증)
 2. ~~반복+무작위 순서+per-shape 워밍업 프로토콜로 context_sweep 재측정~~ (완료 — 이 README)
 3. ~~ballast.py 순회 버그 수정 + pressure_probe 재설계(F16/mmap/무작위/조작검증)~~ (완료, 도구 검증됨)
-4. **재부팅 후** 깨끗한 상태에서 (a) context_sweep 재측정(HF 장문 변동 제거) (b) `pressure_probe --ballast-gb 0,8,16` 실행
+4. 재부팅 후 깨끗한 상태에서 (a) context_sweep 재측정(HF 장문 변동 제거) — *미완* (b) ~~`pressure_probe --ballast-gb 0,8,16` 실행~~ (완료 — [Memory pressure](#memory-pressure-ballast-실험), mmap 가설 재확인)
 5. v3 프로토콜로 CUDA(Colab T4) 재교차검증
 6. NF4 디퀀타이즈 오버헤드 커널 프로파일링, NF4 VRAM 증가 원인 규명(폴링 간격 축소 대조)
 7. GitHub push → Zenodo → DOI (위 마무리 후)
