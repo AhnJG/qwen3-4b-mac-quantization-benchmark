@@ -1,159 +1,136 @@
 # Efficient AI: On-Device Quantization Benchmark (Qwen3-4B-Instruct)
 
-> **Status: v2 (프로토콜 수정 후 재측정).** 외부 동료 리뷰에서 v1 측정 스크립트의 치명적 버그(이중 prefill, GGUF만 챗 템플릿 미적용)와 실험 설계 결함(GGUF 행에서 양자화 방식과 추론 엔진이 동시에 바뀜)이 지적됐습니다. 코드를 고치고 GGUF F16 설정을 추가해 다시 측정했고, **그 결과 "GGUF가 컨텍스트 확장에 가장 강건하다"는 v1의 핵심 결론이 뒤집혔습니다.** 메모리 압박을 조작 변수로 만든 ballast 실험도 진행해 v1의 "GGUF는 mmap 덕분에 스왑에 강건하다" 가설을 직접 검증했습니다 (결과: 반증됨 — [Memory pressure](#memory-pressure-ballast-experiment) 참고). v1 데이터는 `results/*_v1_double_prefill_bug.jsonl`에 감사 기록으로 보존돼 있습니다. CUDA 교차검증은 v1 방식으로 측정된 것이라 재검증이 필요하며 잠정 보류 상태입니다 — 자세한 내용은 [Limitations](#limitations), [Next steps](#next-steps) 참고.
+> **Status: v3.** 두 번의 외부 동료 리뷰를 거치며 측정 코드의 버그를 두 번 잡았습니다. v1은 이중 `generate()` 호출로 prefill이 처리량에 섞였고, v2는 그 "수정"이 다시 틀렸습니다(MPS 비동기 실행 때문에 `time.time()`이 GPU 완료가 아니라 CPU 도달 시각을 찍어, prefill이 또 decode에 누출). v3에서 `sync_device()`로 실측 검증까지 마쳐 고쳤고, 최소 3회 반복 + 무작위 순서로 재측정했습니다. **핵심 결론("GGUF F16이 컨텍스트 확장에 가장 완만")은 버그 수정 후에도 유지**됐지만, 그 해석은 바뀌었습니다(아래). 이 저장소는 실측 하드웨어(Apple M3)가 장시간 벤치마크로 스왑이 누적된 상태에서 측정됐다는 한계가 있으며, 이는 HF 경로의 장문 수치에 큰 변동으로 나타납니다 — [Limitations](#limitations) 참고. 이전 버전의 데이터는 `results/*_v1_*.jsonl`, `results/*_v2_*.jsonl`에 감사 기록으로 보존.
 
 ## TL;DR
 
-> `Qwen3-4B-Instruct-2507`를 세 축(FP16/NF4 × HF/llama.cpp 엔진, 사실상 GGUF-F16 설정 추가로 2×2에 가까운 격자)으로 비교했다. **핵심 발견 1**: "GGUF가 빠르다"의 대부분은 엔진이 아니라 양자화 때문이다 — 같은 정밀도(F16)에서 llama.cpp는 HF `generate()`보다 겨우 1.13배 빠른데, 같은 엔진 안에서 Q4_K_M으로 양자화하면 2.93배 더 빨라진다. **핵심 발견 2**: bitsandbytes NF4는 반대다 — VRAM은 61% 줄지만 속도는 오히려 2.70배 느려진다. 같은 "4-bit"라는 이름 아래 정반대 결과가 나온 것은, llama.cpp의 K-quant 커널은 추론에 맞춰 손수 최적화된 반면 bitsandbytes NF4는 QLoRA 학습(메모리 절감)을 위해 설계돼 추론 시 디퀀타이즈 오버헤드를 상쇄할 커널 융합이 없기 때문으로 보인다. **핵심 발견 3 (v1 결론 반전)**: 측정 버그(이중 prefill)를 고치고 나니, 컨텍스트가 128→4096 토큰으로 늘어날 때 가장 완만하게 저하되는 건 GGUF Q4_K_M(-56.9%)이 아니라 **GGUF F16(-19.6%)**이었다 — GGUF Q4_K_M은 FP16(-55.9%)·NF4(-52.8%)와 비슷하게 저하됐다. 원인은 아직 규명하지 못했다. **핵심 발견 4**: v1이 추측했던 "GGUF는 mmap 덕분에 메모리 압박에 강건하다"는 가설을 ballast 실험(`use_mmap=False` 대조군)으로 직접 검증했더니 반증됐다 — mmap을 꺼도 GGUF 성능은 그대로였다. 자세한 내용은 [Results](#results), [Context-length scaling](#context-length-scaling), [Memory pressure](#memory-pressure-ballast-experiment) 참고.
+> `Qwen3-4B-Instruct-2507`을 2×2 격자(HF/llama.cpp 엔진 × FP16/4-bit)로 비교했다. **엔진 vs 양자화 분리** (ctx=128, 3회 중앙값): 같은 정밀도에서 llama.cpp는 HF `generate()`보다 1.12배 빠른 데 그치지만(엔진 효과), 같은 llama.cpp 안에서 Q4_K_M 양자화는 2.89배를 더 낸다 — "GGUF가 빠르다"의 실체는 대부분 양자화지 엔진이 아니다. 반대로 **bitsandbytes NF4는 4-bit인데도 FP16보다 2.67배 느리다**(0.375배 속도) — VRAM은 62% 줄지만(7.53→2.88GB) 속도는 대가를 치른다. 품질 저하는 NF4 perplexity +2.8%로 미미. **컨텍스트 스케일링(128→4096)**: 저하폭 %로는 GGUF F16(-14%)이 가장 완만하지만, 이건 강건성이 아니라 착시다 — 토큰당 절대 지연 증가는 GGUF F16(+16ms)과 Q4_K_M(+18ms)이 거의 같고, F16이 baseline이 느려 같은 손해가 작은 %로 보일 뿐이다. HF 경로(FP16 -49%, NF4 -45%)는 절대 저하도 크고(각 +108ms/+249ms) 반복 간 변동이 극심한데(FP16 @4096이 1.48~4.71 tok/s), 이는 스왑 포화 상태에서 상주 메모리가 경쟁하기 때문이다 — GGUF(mmap)는 같은 조건에서 안정적이다(F16 @4096: 8.42~8.55). 자세한 내용은 [Results](#results), [Context-length scaling](#context-length-scaling) 참고.
 
 ## What this is
 
-`Qwen/Qwen3-4B-Instruct-2507` 모델을 네 가지 설정(HF FP16, HF NF4 4-bit, llama.cpp GGUF F16, llama.cpp GGUF Q4_K_M)으로 실행하며 다음을 정량 비교합니다.
+`Qwen/Qwen3-4B-Instruct-2507`을 네 설정으로 실행해 정량 비교합니다. GGUF F16을 넣은 이유는 "엔진 효과"와 "양자화 효과"를 분리하기 위해서입니다 — 그러지 않으면 "GGUF Q4_K_M vs HF FP16"에서 엔진과 정밀도가 동시에 바뀌어 원인을 가를 수 없습니다.
 
-- **메모리**: Peak VRAM 사용량 (GB) — HF 경로만 (llama.cpp는 이 측정 API가 없음)
-- **속도**: Time-to-first-token(TTFT), 디코딩 초당 토큰 수(tokens/sec)
-- **품질**: WikiText-2 (test split) sliding-window perplexity (HF 경로만)
+|  | HF transformers 엔진 | llama.cpp 엔진 |
+|---|---|---|
+| **FP16/F16 정밀도** | HF FP16 (baseline) | GGUF F16 |
+| **4-bit 양자화** | HF NF4 (bitsandbytes) | GGUF Q4_K_M |
 
-추가로, 입력 길이가 128 → 4096 토큰으로 늘어날 때 각 설정의 속도/메모리가 어떻게 변하는지 측정합니다.
-
-**설계 의도**: GGUF F16을 넣은 건 "양자화 효과"와 "엔진 효과"를 분리하기 위해서입니다. GGUF Q4_K_M을 HF FP16과 직접 비교하면 양자화 방식과 추론 엔진(Python `generate()` 루프 vs C++ 전용 엔진)이 동시에 바뀌어서, 속도 차이가 어느 쪽 때문인지 알 수 없습니다. GGUF F16(같은 엔진, 같은 정밀도)을 기준점으로 추가하면 `GGUF-F16 / HF-FP16`(엔진 효과)과 `GGUF-Q4_K_M / GGUF-F16`(양자화 효과)으로 분리할 수 있습니다.
+- 행 = 엔진 효과 (`GGUF-F16 / HF-FP16`), 열 = 양자화 효과 (`GGUF-Q4_K_M / GGUF-F16`)
+- 지표: Peak VRAM(HF만), decode tok/s + TTFT, WikiText-2 perplexity(HF만)
+- 컨텍스트 128→4096 토큰 스윕
 
 ## Quickstart
 
-**Google Colab**: `benchmark_quantization.ipynb`을 열고 안내를 따르세요. Runtime을 GPU(T4 이상)로 바꿔야 합니다. (⚠️ 현재 Colab/CUDA 수치는 v1 버그가 있던 방식으로 측정된 것이라 재검증 전까지는 참고용으로만 보세요 — [Limitations](#limitations) 참고.)
-
-**로컬 (CUDA GPU)**:
+**로컬 (Apple Silicon, MPS/Metal)** — 이 README의 실측치는 이 경로(Apple M3):
 ```bash
-python -m venv .venv && source .venv/bin/activate
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124  # CUDA 버전에 맞게 cu121/cu124 등 선택
+CMAKE_ARGS="-DGGML_METAL=on" pip install --no-cache-dir --force-reinstall llama-cpp-python
 
-python benchmark_quantization.py --stage all
-python benchmark_quantization.py --stage context_sweep
+python benchmark_quantization.py --stage all           --repeats 3   # 4설정 헤드라인
+python benchmark_quantization.py --stage context_sweep --repeats 3   # 128~4096 스윕
+python benchmark_quantization.py --stage perplexity                  # HF FP16/NF4 perplexity
 ```
 
-**로컬 (Apple Silicon, MPS/Metal)** — 이 README의 실측치는 이 경로(Apple M3)로 얻었습니다:
-```bash
-python3.12 -m venv .venv && source .venv/bin/activate  # bitsandbytes/torch 호환성 때문에 3.12 권장
-pip install -r requirements.txt   # bitsandbytes는 pip가 자동으로 Apple Silicon 네이티브(MPS 지원) wheel을 설치함
-CMAKE_ARGS="-DGGML_METAL=on" pip install --no-cache-dir --force-reinstall llama-cpp-python  # Metal 가속 빌드
+**로컬 (CUDA GPU)**: `requirements.txt` 설치 후 `pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124`. (⚠️ CUDA 교차검증은 아직 v3 프로토콜로 재측정 전입니다 — [Limitations](#limitations) 참고.)
 
-python benchmark_quantization.py --stage all
-python benchmark_quantization.py --stage context_sweep
-```
-
-개별 스테이지(`fp16`/`nf4`/`gguf`/`gguf_f16`)도 따로 실행할 수 있습니다. 결과는 `results/results.jsonl`에 누적 기록됩니다(각 줄에 `device`, `prompt_tokens`, `n_new`도 포함 — tok/s 계산을 사후 검증할 수 있도록 v2에서 추가).
+결과는 `results/results.jsonl`에 기록됩니다(각 줄에 `device`/`prompt_tokens`/`n_new`/`repeat`/`max_new_tokens` — 사후 검증용). 메모리 압박 실험 도구는 `tools/ballast.py`, `tools/pressure_probe.py`.
 
 ## Results
 
-측정 환경: Apple M3 (macOS, unified memory) · HF 경로(FP16/NF4)는 PyTorch MPS backend, GGUF 경로(F16/Q4_K_M)는 llama.cpp Metal backend · 각 설정 1회 실행.
+측정: Apple M3 (24GB unified memory) · HF는 PyTorch MPS, GGUF는 llama.cpp Metal · 아래는 컨텍스트 128 토큰, **3회 반복의 중앙값**(단발 short-prompt는 반복 간 변동이 커서 헤드라인 기준점으로 부적합).
 
-| Config | Peak VRAM (GB) | Tokens/sec (decode) | TTFT (s) | Perplexity (WikiText-2) |
+| Config | Peak VRAM (GB) | decode tok/s | TTFT (s) | Perplexity |
 |---|---|---|---|---|
-| HF FP16 (baseline) | 7.53 | 7.48 | 0.018 | 9.54 |
-| HF NF4 4-bit (bitsandbytes) | 2.90 | 2.77 | 0.033 | 9.81 |
-| GGUF F16 (llama.cpp) | –** | 8.47 | 0.307 | n/a* |
-| GGUF Q4_K_M (llama.cpp) | –** | 24.85 | 0.130 | n/a* |
+| HF FP16 (baseline) | 7.54 | 8.78 | 0.50 | 9.54 |
+| HF NF4 (bitsandbytes) | 2.88 | 3.29 | 0.70 | 9.81 |
+| GGUF F16 (llama.cpp) | –\* | 9.80 | 0.45 | n/a\*\* |
+| GGUF Q4_K_M (llama.cpp) | –\* | 28.34 | 0.49 | n/a\*\* |
 
-\* GGUF perplexity는 llama.cpp 자체 구현으로 계산되어 FP16/NF4와 동일한 방법이 아니므로 직접 비교하지 않음 (자세한 내용은 [Limitations](#limitations) 참고).
+\* llama.cpp는 torch식 VRAM API가 없어 미측정. \*\* GGUF perplexity는 llama.cpp 자체 구현이라 HF loss 기반과 직접 비교 불가.
 
-\*\* llama.cpp는 torch 스타일의 VRAM 측정 API를 노출하지 않아 미측정.
+### 엔진 효과 vs 양자화 효과
 
-### 엔진 효과 vs 양자화 효과 분리
+|  | 계산식 | 배수 |
+|---|---|---|
+| 엔진 (F16 고정, 엔진만) | GGUF-F16 / HF-FP16 = 9.80 / 8.78 | **1.12배** |
+| 양자화 (llama.cpp 고정, 정밀도만) | GGUF-Q4_K_M / GGUF-F16 = 28.34 / 9.80 | **2.89배** |
+| bitsandbytes 양자화 (HF 고정, 정밀도만) | HF-NF4 / HF-FP16 = 3.29 / 8.78 | **0.375배 (2.67배 느림)** |
 
-|  | 계산식 | 배수 | 해석 |
-|---|---|---|---|
-| 엔진 효과 (같은 F16, 엔진만 다름) | GGUF-F16 / HF-FP16 = 8.47 / 7.48 | **1.13배** | llama.cpp 엔진 자체의 이점은 크지 않음 |
-| 양자화 효과 (같은 llama.cpp, 정밀도만 다름) | GGUF-Q4_K_M / GGUF-F16 = 24.85 / 8.47 | **2.93배** | "GGUF가 빠르다"의 실체는 대부분 이것 |
-| bitsandbytes 양자화 효과 (같은 HF, 정밀도만 다름) | HF-NF4 / HF-FP16 = 2.77 / 7.48 | **0.37배 (2.70배 느림)** | 정반대 방향 |
+"GGUF가 FP16보다 3.23배 빠르다"(28.34/8.78)는 사실이지만 요인을 분리하면 대부분(2.89배)이 K-quant 양자화이고 엔진 자체 기여는 1.12배에 불과합니다. 같은 "4-bit"인데 llama.cpp의 K-quant는 2.89배 빨라지고 bitsandbytes NF4는 2.67배 느려지는 정반대 결과는, K-quant가 추론 전용으로 디퀀타이즈+행렬곱을 융합한 커널인 반면 NF4는 QLoRA 학습의 메모리 절감이 주목적이라 추론 시 디퀀타이즈 오버헤드가 대역폭 절감분을 상쇄하기 때문으로 보입니다(커널 단위 프로파일링으로 직접 검증한 건 아닌 아키텍처 지식 기반 추정).
 
-같은 "4-bit 양자화"라는 이름 아래 llama.cpp의 K-quant(Q4_K_M)는 확실한 속도 향상을, bitsandbytes NF4는 오히려 속도 손해를 냅니다. bitsandbytes NF4는 원래 QLoRA 학습(메모리 절감)을 위해 설계됐고, 추론 시 디퀀타이즈를 행렬곱과 하나로 묶어 처리하는 커널 융합이 없어서 대역폭 절감분을 오버헤드가 상쇄하는 것으로 보입니다 — llama.cpp의 K-quant는 반대로 추론 전용으로 손수 최적화된 커널입니다(둘 다 커널 단위로 직접 프로파일링해 검증한 건 아니고, 일반적으로 알려진 아키텍처 지식에 기반한 추정입니다).
-
-VRAM 절감은 61%(7.53GB → 2.90GB, HF NF4 기준)로 확실했고, perplexity 저하도 +2.8%(9.54 → 9.81)로 미미했습니다 — "VRAM은 확실히 줄지만 속도는 대가를 치른다"가 bitsandbytes NF4에 대한 정확한 요약입니다.
+VRAM 절감은 62%(7.54→2.88GB, HF NF4), perplexity 저하는 +2.8%(9.54→9.81)로 미미 — "메모리는 확실히 줄지만 속도는 대가를 치른다"가 bitsandbytes NF4의 요약입니다.
 
 ### Context-length scaling
 
-프롬프트 길이 128 → 4096 토큰에서 각 설정의 디코딩 tokens/sec:
+프롬프트 128→4096 토큰의 decode tok/s. **3회 반복 중앙값 [최소–최대]**:
 
-| Context (tokens) | HF FP16 | HF NF4 | GGUF F16 | GGUF Q4_K_M |
+| ctx | HF FP16 | HF NF4 | GGUF F16 | GGUF Q4_K_M |
 |---|---|---|---|---|
-| 128 | 9.15 | 3.44 | 9.25 | 31.27 |
-| 512 | 8.23 | 3.16 | 9.25 | 23.52 |
-| 1024 | 6.73 | 2.28 | 9.87 | 22.09 |
-| 2048 | 2.56 | 2.43 | 9.61 | 19.25 |
-| 4096 | 4.04 | 1.62 | 7.44 | 13.48 |
+| 128 | 8.78 [8.72–8.81] | 3.29 [3.29–3.33] | 9.80 [9.34–11.27] | 28.34 [28.20–29.15] |
+| 512 | 6.82 [5.51–8.27] | 3.25 [3.08–3.27] | 9.94 [9.62–11.07] | 27.61 [26.90–27.78] |
+| 1024 | 7.84 [6.38–8.80] | 3.12 [2.71–3.17] | 9.73 [9.58–10.27] | 25.94 [25.41–25.99] |
+| 2048 | 1.91 [1.57–1.99] | 3.05 [3.04–3.06] | 9.24 [9.23–9.29] | 23.22 [16.31–23.23] |
+| 4096 | 4.51 [1.48–4.71] | 1.81 [0.03–2.51] | 8.44 [8.42–8.55] | 18.85 [16.91–19.26] |
 
-저하폭(128→4096): **GGUF F16 -19.6%**, NF4 -52.8%, HF FP16 -55.9%, GGUF Q4_K_M -56.9%.
+TTFT(prefill)는 이제 네 설정 모두 컨텍스트에 거의 선형으로 비례해 4096에서 15~18초로 수렴합니다(C-1 수정 검증 — 버그 있던 v2는 HF TTFT를 0.03초로 보고했는데 이는 4104토큰 prefill로선 물리적으로 불가능).
 
-⚠️ **v1(이 리포트의 이전 버전)에서는 GGUF Q4_K_M이 가장 완만하게 저하된다(-41%)고 결론 내렸는데, 이는 측정 버그였습니다.** v1의 `measure_hf_generate`는 TTFT와 처리량을 재려고 `model.generate()`를 두 번 호출했는데, 두 번째 호출이 KV 캐시 없이 프롬프트를 처음부터 다시 prefill했습니다 — 그래서 HF 경로의 "처리량"에는 컨텍스트 길이만큼의 prefill 시간이 몰래 섞여 있었습니다. 반면 GGUF 경로는 같은 `llm` 인스턴스에 같은 프롬프트로 두 번 호출해서 llama.cpp의 접두사 캐시가 두 번째 호출의 prefill을 건너뛰었습니다 — 그래서 GGUF만 "순수 디코딩" 속도가 재졌고, 나머지는 "prefill+디코딩 뒤섞인" 속도가 재졌습니다. 외부 동료 리뷰가 TTFT(1토큰 생성 시간)가 전체 생성 시간보다 긴 경우(물리적으로 불가능)를 근거로 이 버그를 잡아냈습니다. v2에서는 단일 `generate()`/스트리밍 호출 + 토큰별 타임스탬프로 재작성했고(워밍업도 추가), 그 결과가 위 표입니다.
+**저하폭 %는 오해를 부릅니다.** 128→4096 중앙값 저하: GGUF F16 -14%, GGUF Q4_K_M -33%, NF4 -45%, FP16 -49%. 순서만 보면 "GGUF F16이 가장 강건"이지만, **토큰당 절대 지연 증가로 보면 그렇지 않습니다**:
 
-**v2에서 새로 드러난 점**: GGUF Q4_K_M은 더 이상 가장 강건하지 않고 FP16/NF4와 비슷하게 저하됩니다. 대신 GGUF F16이 가장 완만합니다 — 이건 예상 밖의 결과이고, 원인을 아직 설명하지 못합니다(다음 조사 대상: KV 캐시 크기 자체가 아니라 GGUF의 배치/스케줄링 방식이 F16에서 유독 컨텍스트 성장에 덜 민감한 것인지). HF FP16은 ctx=2048에서 저점(2.56 tok/s)을 찍고 4096에서 반등(4.04)하는 비단조 곡선을 보이는데, 반복 측정 없이는 노이즈인지 실제 현상인지 판단할 수 없습니다.
-
-같은 구간의 Peak VRAM(GB, HF 경로만 — `generate()` 실행 중 20ms 간격 폴링으로 근사, 자세한 내용은 [Limitations](#limitations) 참고):
-
-| Context (tokens) | HF FP16 | HF NF4 |
+| Config | ms/token 128→4096 | 절대 증가 |
 |---|---|---|
-| 128 | 7.537 | 2.878 |
-| 512 | 7.740 | 3.129 |
-| 1024 | 7.963 | 3.168 |
-| 2048 | 8.079 | 3.296 |
-| 4096 | 8.330 | 3.946 |
+| GGUF Q4_K_M | 35.3 → 53.0 | **+17.8 ms** |
+| GGUF F16 | 102.1 → 118.5 | **+16.4 ms** |
+| HF FP16 | 113.9 → 221.9 | +108.0 ms |
+| HF NF4 | 303.6 → 552.1 | +248.5 ms |
 
-FP16 절대 증가량 +0.79GB, NF4 +1.07GB — NF4가 더 큽니다. NF4의 compute dtype도 FP16과 같은 float16이라 KV 캐시 자체의 바이트당 크기는 이론상 비슷해야 하는데, 원인은 v1 때부터 특정하지 못한 채로 남아 있습니다.
+GGUF F16과 Q4_K_M은 컨텍스트가 커질 때 **거의 같은 절대 비용(+16 vs +18 ms/token)**을 추가합니다 — F16이 -14%로 완만해 보이는 건 baseline이 느려서(102ms) 같은 손해가 작은 %로 나올 뿐, 실제로 더 강건한 게 아닙니다. 이건 대역폭 바운드 디코딩의 roofline으로 예상되는 결과입니다(토큰당 읽는 바이트 = 가중치 + KV 캐시; KV 증가는 정밀도와 무관하게 거의 같으므로 절대 지연 증가도 비슷). "GGUF F16이 왜 가장 강건한가"는 미스터리가 아니라 % 지표의 함정이었습니다.
 
-## Memory pressure (ballast experiment)
+**HF 경로의 큰 변동이 진짜 발견입니다.** FP16 @4096은 3회 반복에서 1.48~4.71 tok/s로 3배 넘게 흔들리고, NF4 @4096은 한 번 0.03 tok/s로 사실상 붕괴했습니다. 반면 GGUF는 안정적입니다(F16 @4096: 8.42~8.55). FP16 @2048 중앙값(1.91)이 @4096(4.51)보다 낮은 비단조도 이 변동 때문입니다. 원인은 이 머신이 측정 당시 스왑 포화 상태(8~18GB)였고, HF는 모델·활성화 텐서를 상주 메모리에 두어 다른 프로세스와 경쟁한 반면 GGUF는 mmap으로 페이지 단위 적재라 덜 취약했기 때문으로 보입니다. **즉 메모리 압박 현상이 인위적 ballast 없이 메인 스윕에서 자연스럽게 드러났습니다** — 이는 [별도 ballast 실험](#memory-pressure-ballast-실험)이 겨냥했던 바로 그 효과입니다.
 
-v1은 "다른 앱(Safari 등)을 켜놨더니 스왑으로 속도가 붕괴했다"는 재현 불가능한 일화를 근거로, GGUF가 llama.cpp의 mmap 로딩 덕분에 이 상황에 더 강건하다고 추측했습니다. v2에서는 이걸 통제된 실험으로 바꿨습니다: `tools/ballast.py`로 지정한 크기(GB)만큼 메모리를 할당하고 압축을 피하려 주기적으로 랜덤 데이터로 채워 유지하는 별도 프로세스를 띄운 뒤, 그 압박 수준에서 `vm_stat`을 1초 간격으로 동시 기록하며 각 설정의 속도를 측정합니다(`tools/pressure_probe.py`). GGUF는 **`use_mmap=True`/`False` 대조군**을 둬서 mmap 가설을 직접 검증했습니다.
+같은 구간 Peak VRAM(GB, HF만, 중앙값): FP16 128:7.54 → 4096:8.22 (+0.68), NF4 128:2.88 → 4096:4.03 (+1.15). NF4 절대 증가가 FP16보다 큰 이유는 v1부터 미규명이며, MPS 폴링 근사의 노이즈일 가능성이 있습니다([Limitations](#limitations)).
 
-ballast 0GB vs 16GB, ctx=128(짧음)와 4096(김)에서 측정한 디코딩 tok/s:
+## Memory pressure (ballast 실험)
 
-| Config | ctx=128 (ballast 0GB) | ctx=128 (16GB) | ctx=4096 (0GB) | ctx=4096 (16GB) |
-|---|---|---|---|---|
-| HF FP16 | 8.92 | 8.07 | 0.60 | 0.30 |
-| HF NF4 | 3.29 | 3.25 | 0.78 | 0.87 |
-| GGUF Q4_K_M (mmap) | 27.81 | 30.78 | 19.91 | 20.46 |
-| GGUF Q4_K_M (**mmap 끔**) | 29.31 | 30.91 | 19.60 | 19.57 |
+v1은 "다른 앱이 켜져 있어 스왑으로 붕괴"라는 재현 불가 일화로 "GGUF는 mmap 덕분에 강건"을 주장했습니다. v2에서 이를 통제 실험으로 만들었지만(ballast 프로세스로 메모리 강제 점유 + mmap on/off 대조), 두 가지 결함이 드러났습니다: (a) `ballast.py`가 초기 fill 후 64MB 창만 재기록하는 순회 버그로 나머지 ~99%가 스왑아웃돼 실제 압박을 유지하지 못했고, (b) 0GB 기준선이 이미 스왑 30GB로 오염돼 "유휴 vs 압박"이 아니라 "압박 vs 더-압박"이었습니다.
 
-**mmap 가설은 반증됐습니다.** `use_mmap=False`로 mmap을 완전히 꺼도 GGUF의 성능은 mmap을 켰을 때와 사실상 동일합니다(ctx=4096에서 19.60 vs 19.91, 19.57 vs 20.46 — 둘 다 오차 범위). GGUF가 메모리 압박에 강건한 이유가 "파일을 mmap으로 열어서"라는 v1의 설명은 이 데이터로는 지지되지 않습니다. 두 번째 외부 리뷰가 제안한 대안(PyTorch 캐싱 할당자의 파편화 vs llama.cpp의 정적 KV 아레나 할당)이 더 그럴듯한 설명으로 남습니다.
+v3에서 도구는 완전히 고쳤습니다:
+- `ballast.py` 순회 버그 수정(전 페이지를 매 주기 터치해 상주 유지 — 3GB 요청 시 RSS가 축소 없이 유지됨을 확인)
+- `pressure_probe.py`에 **GGUF F16 추가**(8GB 가중치로 압박에 가장 취약한 후보), **config 순서 무작위화**(순서 교락 제거), **매 측정 시점의 실제 스왑 사용량 기록**(압박이 실제로 걸렸는지 조작검증), 다단계 ballast(0/8/16GB 양성 대조), 그리고 v3의 수정된 측정 경로(`measure_one`) 사용
 
-⚠️ **다만 이 실험의 "ballast 0GB" 기준선은 깨끗한 유휴 상태가 아니었습니다.** 이 프로젝트를 여러 시간 동안 연속으로 실행하면서 시스템 스왑이 이미 크게 불어나 있었고(`vm_stat` 확인 결과 실험 시작 시점에 스왑 사용량이 30GB를 넘었음), HF FP16/NF4는 추가 ballast 없이도 이미 ctx=4096에서 심하게 느렸습니다(0.60/0.78 tok/s — v2 본편의 깨끗한 측정치 4.04/1.62 tok/s보다 훨씬 나쁨). 즉 이번 0GB vs 16GB 비교는 "유휴 상태 vs 압박 상태"가 아니라 "이미 압박된 상태 vs 더 압박된 상태"의 비교에 가깝습니다. GGUF는 두 수준 모두에서 전혀 흔들리지 않았다는 점(mmap 유무와 무관하게)은 신뢰할 수 있지만, HF 경로가 정확히 "몇 GB부터" 무너지기 시작하는지는 이 실험으로 알 수 없습니다 — 재부팅한 깨끗한 상태에서 재실행해야 합니다([Next steps](#next-steps) 참고).
+**그러나 통제된 재실행은 보류했습니다.** 깨끗한 0GB 기준선은 재부팅이 필요한데(이 세션은 수 시간 벤치마크로 스왑이 8~18GB 누적), 재부팅은 사용자 조작입니다. 이미 압박된 머신에서 ballast를 더 얹으면 v2의 "압박 vs 더-압박" 문제를 그대로 반복할 뿐입니다. 대신 위 [Context-length scaling](#context-length-scaling)의 반복 spread가 같은 효과(HF는 장문에서 노이즈 지배, GGUF는 안정)를 ballast 없이 더 깨끗하게 보여주므로 이를 1차 근거로 삼았습니다. 재부팅 후 `tools/pressure_probe.py --ballast-gb 0,8,16` 실행이 남은 확정 단계입니다.
 
 ## Related benchmarks (sanity check)
 
-이 프로젝트와 똑같은 조합(FP16 vs bitsandbytes-NF4 vs GGUF, 이 모델 기준)을 그대로 측정한 공개 자료는 찾지 못했지만, 양자화의 일반적인 트레이드오프는 이미 여러 곳에 보고돼 있습니다.
+- Unsloth GGUF Benchmarks — Q4_K_M vs Q5_K_M perplexity
+- 커뮤니티: Q4_K_M ≈ FP16 대비 용량 75% 감소, 품질 저하 1~3%(MMLU)
 
-- Unsloth GGUF Benchmarks — Q4_K_M vs Q5_K_M perplexity 비교
-- 커뮤니티 보고: Q4_K_M은 FP16 대비 용량 약 75% 감소, MMLU 등 품질 저하는 1~3% 수준
-
-우리 perplexity 저하폭(NF4 +2.8%)은 이 범위 안에 들어와 방향이 일치합니다. 다만 지표(WikiText-2 언어모델링 손실 vs MMLU 정확도)와 양자화 방식(bitsandbytes NF4 vs GGUF Q4_K_M)이 서로 달라 엄밀한 검증은 아닙니다.
+우리 perplexity 저하(NF4 +2.8%)는 이 범위와 방향이 일치하나, 지표(WikiText-2 언어모델링 손실 vs MMLU 정확도)·양자화 방식(NF4 vs GGUF)이 달라 엄밀한 검증은 아닙니다.
 
 ## Limitations
 
-- **GGUF perplexity는 FP16/NF4와 다른 방식으로 계산됨** (llama.cpp 내부 구현 vs HuggingFace loss 기반). 숫자를 나란히 두되 "직접 비교 불가"임을 명시.
-- **단일 실행 기준**입니다 (반복 측정 후 평균/분산을 내지 않음). HF FP16의 ctx=2048/4096 간 비단조 구간처럼, 노이즈인지 실제 현상인지 구분이 안 되는 지점이 있습니다.
-- **CUDA 교차검증은 v1 버그가 있던 방식으로 측정됐습니다.** `results/results_cuda_t4_colab_v1_double_prefill_bug.jsonl`에 원본 데이터가 남아있지만, 이중 prefill 버그가 있던 스크립트로 측정한 것이므로 결론(특히 컨텍스트 스케일링 관련 부분)을 그대로 신뢰할 수 없습니다. 재검증 전까지 이 README에서 제외했습니다 — [Next steps](#next-steps) 참고.
-- **ballast 실험의 "0GB" 기준선이 깨끗한 유휴 상태가 아니었습니다.** 이 프로젝트를 여러 시간 연속 실행하면서 시스템 스왑이 이미 30GB 넘게 불어 있었습니다 — [Memory pressure](#memory-pressure-ballast-experiment) 참고. GGUF가 mmap 유무와 무관하게 두 압박 수준 모두에서 흔들리지 않았다는 결론은 신뢰할 수 있지만, HF 경로가 정확히 몇 GB부터 무너지는지는 재부팅 후 재측정이 필요합니다.
-- **MPS에서의 Peak VRAM은 폴링 기반 근사치**입니다. PyTorch의 MPS backend는 CUDA의 `reset_peak_memory_stats()`/`max_memory_allocated()`에 대응하는 reset 가능한 peak 카운터를 제공하지 않습니다. `generate()` 실행 중 백그라운드 스레드가 20ms 간격으로 `torch.mps.current_allocated_memory()`를 폴링해 최댓값을 추적하는 방식(`PeakMemoryTracker`)으로 근사했으며, 폴링 간격보다 짧게 스파이크하는 할당은 놓칠 수 있습니다.
-- **GGUF 경로는 매 컨텍스트 길이마다 워밍업 후 `llm.reset()`으로 캐시를 비우고 측정**합니다 — 즉 매번 진짜 prefill을 다시 겪습니다. 이건 실사용(멀티턴 대화에서 접두사가 재사용되는 상황)보다 더 보수적인(불리한) 조건입니다.
-- **GGUF F16이 컨텍스트 확장에 가장 강건한 이유는 규명하지 못했습니다** — 위 [Context-length scaling](#context-length-scaling) 참고.
-- **NF4의 절대 VRAM 증가량이 FP16보다 큰 이유도 v1부터 미규명 상태입니다.**
+- **측정 머신이 스왑 포화 상태였습니다** (8~18GB). HF(상주 메모리) 장문 수치는 반복 간 변동이 극심하므로(FP16 @4096: 1.48~4.71) 중앙값+범위로 보고했습니다. 깨끗한 측정은 재부팅이 필요하며, GGUF·단문 수치와 엔진/양자화 비율은 상대적으로 안정적입니다.
+- **3회 반복 기준**입니다. 변동이 큰 셀은 반복을 더 늘려야 신뢰구간이 좁아집니다.
+- **CUDA 교차검증은 v1 버그 방식으로 측정된 것이라 제외**했습니다(`results/results_cuda_t4_colab_v1_double_prefill_bug.jsonl`). C-1은 CUDA도 비동기라 동일하게 발현하므로, v3 프로토콜로 재측정해야 유효합니다.
+- **ballast 통제 실험은 도구만 완비**됐고 실행은 재부팅 후로 보류(위 참고).
+- **MPS Peak VRAM은 20ms 폴링 근사**로 짧은 스파이크를 놓칠 수 있습니다. NF4의 절대 VRAM 증가가 FP16보다 큰 원인은 미규명이며, 폴링 노이즈일 가능성이 있습니다.
+- **GGUF 경로는 매 측정 워밍업 후 `llm.reset()`으로 캐시를 비워** 매번 완전한 prefill을 강제합니다 — 접두사가 재사용되는 실사용 멀티턴 대화보다 보수적(불리한) 조건입니다.
+- **속도 지표는 커널 프로파일링이 아닌 end-to-end 측정**입니다. NF4가 느린 원인(디퀀타이즈 커널 융합 부재)은 아키텍처 지식 기반 추정이며 직접 프로파일링은 안 했습니다.
 
 ## Next steps
 
-1. ~~Apple M3(MPS/Metal)에서 `--stage all` 및 `--stage context_sweep` 실행~~ (v1, 완료 — 버그 있는 방식이었음이 이후 드러남)
-2. ~~외부 동료 리뷰 2건 수령, 이중 prefill 버그 및 실험 설계 결함(엔진×양자화 교락) 확인~~ (완료)
-3. ~~측정 스크립트 재작성(단일 호출+토큰 타임스탬프, 워밍업, GGUF도 챗 템플릿 적용) + GGUF F16 설정 추가 + Apple M3에서 전면 재측정~~ (완료 — 이 README가 그 결과)
-4. ~~메모리 압박을 "관측 변수"가 아니라 "조작 변수"로 바꾸는 실험~~ (완료 — `tools/ballast.py` + `tools/pressure_probe.py`, [Memory pressure](#memory-pressure-ballast-experiment)에 반영. mmap 가설은 반증됐으나 0GB 기준선이 깨끗하지 않아 재부팅 후 재실행 필요)
-5. **재부팅한 깨끗한 상태에서 ballast 실험 재실행** (0/4/8/12/16GB로 세분화) — 지금 결과는 "유휴 vs 압박"이 아니라 "이미 압박 vs 더 압박"의 비교였음
-6. v2 프로토콜로 Colab(CUDA T4)에서 재교차검증
-7. GGUF F16이 컨텍스트 확장에 가장 강건한 이유 규명 (반복 측정, KV 캐시/스케줄링 프로파일링)
-8. 최소 3회 반복 측정 + 표준편차 보고
-9. GitHub에 push → Zenodo 연동 → 릴리즈 태그 → DOI 발급 (위 항목들 마무리 후)
+1. ~~C-1(async TTFT 누출)·M-1(GGUF 청크 카운트)·D-8 수정~~ (완료 — 실측 검증)
+2. ~~반복+무작위 순서+per-shape 워밍업 프로토콜로 context_sweep 재측정~~ (완료 — 이 README)
+3. ~~ballast.py 순회 버그 수정 + pressure_probe 재설계(F16/mmap/무작위/조작검증)~~ (완료, 도구 검증됨)
+4. **재부팅 후** 깨끗한 상태에서 (a) context_sweep 재측정(HF 장문 변동 제거) (b) `pressure_probe --ballast-gb 0,8,16` 실행
+5. v3 프로토콜로 CUDA(Colab T4) 재교차검증
+6. NF4 디퀀타이즈 오버헤드 커널 프로파일링, NF4 VRAM 증가 원인 규명(폴링 간격 축소 대조)
+7. GitHub push → Zenodo → DOI (위 마무리 후)
 
 ## Citation
 
-`CITATION.cff` 참고 (저자명/저장소 주소는 TODO로 표시되어 있으니 채워 넣을 것).
+`CITATION.cff` 참고 (저자명/저장소 TODO).
 
 ## License
 
-Code: MIT (`LICENSE` 참고). Report/데이터: CC-BY-4.0 권장.
+Code: MIT (`LICENSE`). Report/데이터: CC-BY-4.0 권장.
