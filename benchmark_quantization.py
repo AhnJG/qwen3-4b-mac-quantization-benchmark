@@ -3,37 +3,47 @@ benchmark_quantization.py
 
 Efficient AI / On-Device Quantization Benchmark
 -------------------------------------------------
-Compares FP16 (baseline), 4-bit NF4 (bitsandbytes), and GGUF Q4_K_M (llama.cpp)
-inference for Qwen3-4B-Instruct-2507 on three axes:
-  1. Peak VRAM usage
-  2. Generation speed (tokens/sec) and time-to-first-token (TTFT)
-  3. Output quality (perplexity on the WikiText-2 test split)
+Compares four configs for Qwen3-4B-Instruct-2507:
+  - HF FP16          (transformers, PyTorch)
+  - HF NF4 4-bit     (transformers + bitsandbytes)
+  - GGUF F16         (llama.cpp)          } same engine, so the pair isolates
+  - GGUF Q4_K_M      (llama.cpp)          } the quantization effect from the engine
 
-It also sweeps prompt/context length (128 -> 4096 tokens) to show how VRAM
-(KV-cache growth) and speed degrade as context grows -- this is the
-differentiating angle beyond a standard "single short prompt" benchmark.
+on three axes: peak VRAM (HF only), decode speed (tokens/sec) + TTFT, and
+WikiText-2 perplexity (HF only). It also sweeps prompt length 128..4096.
 
-Designed to run top-to-bottom in Google Colab (T4/L4 GPU runtime).
-See README.md for setup instructions.
+Measurement protocol (v3 -- rewritten after external peer review found the v2
+timing was still wrong):
+  * HF timing uses a SINGLE generate() call with a logits-processor callback
+    that timestamps every decode step. Crucially the callback calls
+    sync_device() BEFORE stamping: MPS/CUDA execution is asynchronous, so a
+    bare time.time() records when the CPU reached that line, not when the GPU
+    finished the work -- which let the whole prefill leak into the reported
+    "decode" time (empirically: TTFT read 0.03s for a 4096-token prefill that
+    actually takes ~16s, and that ~16s reappeared inside decode_time). This is
+    the v2 reincarnation of v1's double-prefill bug; the sync fixes it.
+  * GGUF timing streams a single call and skips llama.cpp's trailing
+    finish_reason chunk (which carries no token but was being counted, giving
+    n_new = max_tokens+1 and a small systematic tok/s over-count).
+  * Every measurement loads its backend fresh, warms up at its own prompt
+    shape (discarded), then measures -- so HF is symmetric to GGUF (which
+    already rebuilds per call), cross-measurement allocator fragmentation
+    can't accumulate along the context axis, and MPS shape-specific kernel
+    compilation is paid before the timed run.
+  * The (config x context) task list is measured in randomized order and
+    repeated N times; report the median and spread rather than a single run.
 
 Usage:
-    python benchmark_quantization.py --stage all
-    python benchmark_quantization.py --stage fp16
-    python benchmark_quantization.py --stage nf4
-    python benchmark_quantization.py --stage gguf
-    python benchmark_quantization.py --stage context_sweep
+    python benchmark_quantization.py --stage all [--repeats 3]
+    python benchmark_quantization.py --stage context_sweep [--repeats 3]
     python benchmark_quantization.py --stage perplexity
-
-Note: this script was authored and syntax-checked without access to a GPU or
-to huggingface.co (sandboxed authoring environment). Expect to do a small
-amount of first-run debugging on your actual GPU environment -- most likely
-around the exact GGUF filename on the Hub and CUDA/driver versions.
 """
 
 import argparse
 import dataclasses
 import gc
 import json
+import random
 import threading
 import time
 from pathlib import Path
@@ -43,15 +53,17 @@ import torch
 
 MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 GGUF_REPO = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
-GGUF_FILENAME_HINT = "Q4_K_M"  # script globs for a file containing this substring
-# F16 GGUF isolates the *engine* effect (llama.cpp vs HF transformers) from
-# the *quantization* effect: GGUF-F16 vs HF-FP16 is same precision, different
-# engine; GGUF-Q4_K_M vs GGUF-F16 is same engine, different precision. Without
-# this, "GGUF is Nx faster" conflates both (an external review's main design
-# critique -- see notes/).
+GGUF_FILENAME_HINT = "Q4_K_M"   # globs for a file containing this substring
 GGUF_F16_FILENAME_HINT = "-F16"
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
+
+PROMPT = "Explain the core concept of model quantization in 3 bullet points."
+MAX_NEW_TOKENS = 150
+CONTEXT_LENGTHS = [128, 512, 1024, 2048, 4096]   # used only in --stage context_sweep
+HF_CONFIGS = ("FP16", "NF4_4bit")
+GGUF_CONFIGS = ("GGUF_Q4_K_M", "GGUF_F16")
+ALL_CONFIGS = HF_CONFIGS + GGUF_CONFIGS
 
 # --- device abstraction (CUDA or Apple Silicon MPS) --------------------------
 if torch.cuda.is_available():
@@ -72,13 +84,11 @@ def sync_device():
 class PeakMemoryTracker:
     """Tracks peak allocated device memory across a `with` block.
 
-    On CUDA this just wraps torch.cuda's built-in reset/max_memory_allocated
-    counters (exact). torch.mps exposes no equivalent reset-able peak counter
-    -- current_allocated_memory() sampled *after* the block would only see
-    whatever survives once the block's local tensors (e.g. generate()'s
-    internal KV cache) have already been freed by Python refcounting, not the
-    actual peak reached mid-generation. So on MPS a background thread polls
-    current_allocated_memory() while the block runs and keeps the max.
+    On CUDA this wraps torch.cuda's reset/max_memory_allocated (exact).
+    torch.mps has no reset-able peak counter, so a background thread polls
+    current_allocated_memory() every 20ms and keeps the max. Note this samples
+    torch's *allocated* bytes, not the driver's high-water mark, and can miss
+    spikes shorter than the poll interval -- reported as an approximation.
     """
 
     def __init__(self, poll_interval_s=0.02):
@@ -129,25 +139,20 @@ def load_causal_lm(model_id, dtype=None, quantization_config=None):
     from transformers import AutoModelForCausalLM
 
     if quantization_config is not None:
-        # bitsandbytes' loading path handles device_map={"":"mps"} fine.
         device_map = "auto" if DEVICE_KIND == "cuda" else {"": DEVICE_KIND}
         return AutoModelForCausalLM.from_pretrained(
             model_id, quantization_config=quantization_config, device_map=device_map
         )
 
     if DEVICE_KIND == "mps":
-        # On this stack (transformers 5.14 / accelerate 1.14 / torch 2.13),
-        # loading fp16 weights with device_map={"":"mps"} segfaults inside
-        # accelerate's meta-device weight dispatch; load on CPU then move.
+        # transformers 5.14 / accelerate 1.14 / torch 2.13: fp16 weights with
+        # device_map={"":"mps"} segfault in accelerate's meta dispatch; load on
+        # CPU then move.
         model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
         return model.to("mps")
 
     device_map = "auto" if DEVICE_KIND != "cpu" else None
     return AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype, device_map=device_map)
-
-PROMPT = "Explain the core concept of model quantization in 3 bullet points."
-MAX_NEW_TOKENS = 150
-CONTEXT_LENGTHS = [128, 512, 1024, 2048, 4096]  # used only in --stage context_sweep
 
 
 @dataclasses.dataclass
@@ -161,6 +166,8 @@ class BenchmarkResult:
     device: Optional[str] = None
     prompt_tokens: Optional[int] = None
     n_new: Optional[int] = None
+    repeat: Optional[int] = None
+    max_new_tokens: Optional[int] = None
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -170,10 +177,10 @@ def log_result(result: BenchmarkResult, path: Path = RESULTS_DIR / "results.json
     with open(path, "a") as f:
         f.write(json.dumps(result.to_dict()) + "\n")
     print(
-        f"[{result.config}] ctx={result.context_len} "
+        f"[{result.config}] ctx={result.context_len} rep={result.repeat} "
         f"VRAM={result.peak_vram_gb} GB  "
         f"TTFT={result.ttft_s:.3f}s  "
-        f"speed={result.tokens_per_sec:.2f} tok/s  "
+        f"decode={result.tokens_per_sec:.2f} tok/s  "
         f"ppl={result.perplexity}"
     )
 
@@ -186,11 +193,8 @@ FILLER_TEXT = (
 
 
 def build_long_prompt(target_tokens: int, tokenize, decode) -> str:
-    """Build a prompt of exactly `target_tokens` tokens by repeating
-    FILLER_TEXT, using the given tokenize/decode callables. Shared by the HF
-    and GGUF paths so both context sweeps grow from the identical text --
-    tweaking the filler in only one place would silently break the
-    apples-to-apples comparison between backends."""
+    """Build `target_tokens` worth of filler by repeating FILLER_TEXT, counting
+    length with the given tokenize/decode callables."""
     text = FILLER_TEXT
     while len(tokenize(text)) < target_tokens:
         text += FILLER_TEXT
@@ -205,22 +209,25 @@ def make_long_prompt(tokenizer, target_tokens: int) -> str:
     )
 
 
+def make_long_prompt_gguf(llm, target_tokens: int) -> str:
+    """GGUF filler counter. add_bos=False so the count matches what actually
+    gets fed later (Qwen3 GGUF has add_bos_token=false, but being explicit keeps
+    this correct if the model is ever swapped for a BOS-adding one)."""
+    return build_long_prompt(
+        target_tokens,
+        tokenize=lambda t: llm.tokenize(t.encode("utf-8"), add_bos=False),
+        decode=lambda ids: llm.detokenize(ids).decode("utf-8", errors="ignore"),
+    )
+
+
 def build_chat_prompt_string(tokenizer, prompt: str) -> str:
-    """Render `prompt` through the model's chat template as a plain string
-    (this is an *Instruct* model, so raw continuation would be an unfair/
-    unrealistic test -- and an unrealistic OOD input for the model, per the
-    review that flagged the GGUF path skipping this). enable_thinking=False
-    keeps output length comparable across configs; if your tokenizer's
-    template doesn't recognize the kwarg it is silently ignored by Jinja.
-    Both the HF and GGUF paths render through *this same* HF tokenizer call,
-    so the two backends see byte-identical prompts -- not just "close enough"
-    templates from two different Jinja engines."""
+    """Render `prompt` through the model's chat template as a plain string.
+    Both HF and GGUF paths render the template wrapper through *this same* HF
+    tokenizer call (the filler inside is length-matched by each backend's own
+    tokenizer -- see prompt_tokens equality across the sweep)."""
     messages = [{"role": "user", "content": prompt}]
     return tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=False,
-        enable_thinking=False,
+        messages, add_generation_prompt=True, tokenize=False, enable_thinking=False,
     )
 
 
@@ -230,45 +237,26 @@ def build_chat_input_ids(tokenizer, model, prompt: str):
     return encoded["input_ids"].to(model.device)
 
 
-def warmup_hf_generate(model, tokenizer):
-    """One untimed generate() call to pay CUDA/MPS one-time costs (context
-    init, cuBLAS handle creation, kernel autotune, lazy module init) before
-    any timed measurement. Without this, whichever config/context-length
-    happens to run first absorbs the whole cost, producing a non-monotonic
-    TTFT that looks like a real effect but isn't (caught by external review:
-    TTFT at ctx=128 was *longer* than at ctx=512)."""
-    ids = tokenizer("Warm up.", return_tensors="pt").input_ids.to(model.device)
-    with torch.no_grad():
-        model.generate(input_ids=ids, max_new_tokens=4, do_sample=False)
-    sync_device()
+# --- HF timing ---------------------------------------------------------------
 
-
-def measure_hf_generate(model, tokenizer, prompt: str, max_new_tokens=MAX_NEW_TOKENS):
-    """Time a *single* generate() call, using a logits processor to stamp a
-    timestamp on every decoding step (including the first). This replaces an
-    earlier two-call design (one generate(max_new_tokens=1) for TTFT, then a
-    second *independent* generate(max_new_tokens=150) for throughput) that an
-    external review caught: the second call didn't reuse the first call's KV
-    cache, so it silently re-ran the full O(context) prefill and folded that
-    time into what was reported as decode throughput. That made tok/s crash
-    with context length far faster than real decoding does, and made the
-    (single-call, prefix-cache-reusing) GGUF path look artificially more
-    robust to context growth by comparison -- not because it in fact was."""
+def measure_hf_generate(model, tokenizer, prompt, max_new_tokens=MAX_NEW_TOKENS):
+    """Single generate(); a logits processor stamps a *synced* timestamp per
+    decode step so TTFT and decode are separated on the real GPU timeline."""
     from transformers import LogitsProcessorList
 
     input_ids = build_chat_input_ids(tokenizer, model, prompt)
     attention_mask = torch.ones_like(input_ids)
-
     timestamps = []
 
     def _stamp(_input_ids, scores):
+        sync_device()                       # ← C-1 fix: real wall-clock, not CPU-ahead
         timestamps.append(time.time())
         return scores
 
     with PeakMemoryTracker() as mem:
         start = time.time()
         with torch.no_grad():
-            out = model.generate(
+            model.generate(
                 input_ids=input_ids, attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens, do_sample=False,
                 logits_processor=LogitsProcessorList([_stamp]),
@@ -276,7 +264,6 @@ def measure_hf_generate(model, tokenizer, prompt: str, max_new_tokens=MAX_NEW_TO
         sync_device()
 
     vram = mem.peak_gb()
-
     n_new = len(timestamps)
     ttft = timestamps[0] - start
     decode_time = timestamps[-1] - timestamps[0] if n_new > 1 else float("nan")
@@ -284,67 +271,36 @@ def measure_hf_generate(model, tokenizer, prompt: str, max_new_tokens=MAX_NEW_TO
     return ttft, tps, vram, input_ids.shape[1], n_new
 
 
-def run_fp16(context_sweep=False):
-    from transformers import AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    model = load_causal_lm(MODEL_ID, dtype=torch.float16)
-    warmup_hf_generate(model, tokenizer)
-
-    for ctx_len in (CONTEXT_LENGTHS if context_sweep else [None]):
-        prompt = make_long_prompt(tokenizer, ctx_len) if ctx_len else PROMPT
-        ttft, tps, vram, prompt_tokens, n_new = measure_hf_generate(model, tokenizer, prompt)
-        log_result(BenchmarkResult(
-            "FP16", ctx_len, vram, ttft, tps,
-            device=DEVICE_KIND, prompt_tokens=prompt_tokens, n_new=n_new,
-        ))
-
-    del model
-    gc.collect()
-    empty_cache()
+def warmup_hf(model, tokenizer, prompt):
+    """Prefill this exact prompt + a few decode steps, untimed, so the timed
+    run below doesn't pay MPS shape-specific kernel compilation."""
+    ids = build_chat_input_ids(tokenizer, model, prompt)
+    with torch.no_grad():
+        model.generate(input_ids=ids, attention_mask=torch.ones_like(ids),
+                        max_new_tokens=4, do_sample=False)
+    sync_device()
 
 
-def run_nf4(context_sweep=False):
-    from transformers import AutoTokenizer, BitsAndBytesConfig
+# --- GGUF timing -------------------------------------------------------------
 
-    if DEVICE_KIND == "cpu":
-        print(
-            "[NF4] No CUDA or MPS GPU detected -- bitsandbytes 4-bit needs a "
-            "GPU backend. Skipping this stage."
-        )
-        return
-
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.float16,
-    )
-    try:
-        model = load_causal_lm(MODEL_ID, quantization_config=bnb_config)
-    except Exception as e:
-        # bitsandbytes' Apple Silicon/MPS support is version-dependent; on a
-        # build without working MPS 4-bit kernels this fails at load time.
-        print(
-            f"[NF4] bitsandbytes 4-bit failed to load on {DEVICE_KIND} "
-            f"({e!r}). Skipping this stage."
-        )
-        return
-
-    warmup_hf_generate(model, tokenizer)
-
-    for ctx_len in (CONTEXT_LENGTHS if context_sweep else [None]):
-        prompt = make_long_prompt(tokenizer, ctx_len) if ctx_len else PROMPT
-        ttft, tps, vram, prompt_tokens, n_new = measure_hf_generate(model, tokenizer, prompt)
-        log_result(BenchmarkResult(
-            "NF4_4bit", ctx_len, vram, ttft, tps,
-            device=DEVICE_KIND, prompt_tokens=prompt_tokens, n_new=n_new,
-        ))
-
-    del model
-    gc.collect()
-    empty_cache()
+def measure_gguf_generate(llm, prompt_str, max_new_tokens=MAX_NEW_TOKENS):
+    """Single streaming call. Skip the trailing empty finish_reason chunk so
+    n_new counts real tokens (M-1 fix)."""
+    timestamps = []
+    n_new = 0
+    start = time.time()
+    for chunk in llm(
+        prompt_str, max_tokens=max_new_tokens, stream=True,
+        temperature=0.0, top_k=1, repeat_penalty=1.0,
+    ):
+        if chunk["choices"][0]["finish_reason"] is not None:
+            break
+        timestamps.append(time.time())
+        n_new += 1
+    ttft = timestamps[0] - start
+    decode_time = timestamps[-1] - timestamps[0] if n_new > 1 else float("nan")
+    tps = (n_new - 1) / decode_time if n_new > 1 and decode_time > 0 else float("nan")
+    return ttft, tps, n_new
 
 
 def download_gguf(filename_hint: str) -> str:
@@ -357,103 +313,94 @@ def download_gguf(filename_hint: str) -> str:
     ]
     if not candidates:
         raise FileNotFoundError(
-            f"No file containing '{filename_hint}' found in {GGUF_REPO}. "
-            f"Check https://huggingface.co/{GGUF_REPO} for an actual filename."
+            f"No file containing '{filename_hint}' found in {GGUF_REPO}."
         )
     local_path = hf_hub_download(GGUF_REPO, candidates[0])
-    print(f"[GGUF] downloaded {candidates[0]}")
     return local_path
 
 
-def make_long_prompt_gguf(llm, target_tokens: int) -> str:
-    """Build `target_tokens` worth of *filler content* using llama.cpp's own
-    tokenizer to count length (this is the inner text later wrapped in a chat
-    template -- see run_gguf). The original word-repetition approximation
-    underestimated token count badly enough to exceed the allocated n_ctx and
-    crash at ctx_len=4096."""
-    return build_long_prompt(
-        target_tokens,
-        tokenize=lambda t: llm.tokenize(t.encode("utf-8")),
-        decode=lambda ids: llm.detokenize(ids).decode("utf-8", errors="ignore"),
-    )
+# --- one self-contained measurement ------------------------------------------
 
-
-def run_gguf(config_name: str, filename_hint: str, context_sweep=False):
-    try:
-        from llama_cpp import Llama
-    except ImportError:
-        print(
-            "[GGUF] llama-cpp-python not installed or failed to import with "
-            "CUDA support. See README.md for the CUDA install command. Skipping."
-        )
-        return
-
+def measure_one(config, ctx_len, max_new_tokens=MAX_NEW_TOKENS, use_mmap=True):
+    """Load the backend for `config` fresh, build the ctx_len prompt, warm up at
+    that exact shape (discarded), measure once, tear down. Returns a dict."""
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    model_path = download_gguf(filename_hint)
 
-    for ctx_len in (CONTEXT_LENGTHS if context_sweep else [None]):
-        n_ctx = (ctx_len or 0) + MAX_NEW_TOKENS + 64
-        llm = Llama(model_path=model_path, n_gpu_layers=-1, n_ctx=n_ctx, verbose=False)
+    if config in HF_CONFIGS:
+        if config == "FP16":
+            model = load_causal_lm(MODEL_ID, dtype=torch.float16)
+        else:
+            from transformers import BitsAndBytesConfig
+            bnb = BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.float16,
+            )
+            model = load_causal_lm(MODEL_ID, quantization_config=bnb)
 
-        filler = make_long_prompt_gguf(llm, ctx_len) if ctx_len else PROMPT
-        # Same HF tokenizer, same chat template, as the HF path -- so both
-        # backends see byte-identical formatted prompts (an external review
-        # caught the earlier version feeding GGUF a raw, un-templated string,
-        # which is an out-of-distribution input for an instruct model).
-        prompt_str = build_chat_prompt_string(tokenizer, filler)
-        # add_bos=False, special=True to match exactly what Llama.__call__
-        # itself does internally when tokenizing a plain (no-FIM-suffix)
-        # prompt -- otherwise this count wouldn't reflect what's actually fed
-        # to the model (and literal "<|im_start|>" etc. would be counted as
-        # ordinary text tokens instead of the single control token each is).
-        prompt_tokens = len(llm.tokenize(prompt_str.encode("utf-8"), add_bos=False, special=True))
-
-        # Untimed warmup on a throwaway prompt, then reset() so the timed
-        # call below is forced to do a full, fresh prefill instead of
-        # silently reusing the warmup's cached prefix (the mechanism behind
-        # the earlier double-call bug: two calls on the *same* prompt let
-        # llama.cpp's prefix-cache skip prefill on the second one entirely).
-        _ = list(llm("Warm up.", max_tokens=4, temperature=0.0))
-        llm.reset()
-
-        timestamps = []
-        n_new = 0
-        start = time.time()
-        for _chunk in llm(
-            prompt_str, max_tokens=MAX_NEW_TOKENS, stream=True,
-            temperature=0.0, top_k=1, repeat_penalty=1.0,
-        ):
-            timestamps.append(time.time())
-            n_new += 1
-
-        ttft = timestamps[0] - start
-        decode_time = timestamps[-1] - timestamps[0] if n_new > 1 else float("nan")
-        tps = (n_new - 1) / decode_time if n_new > 1 and decode_time > 0 else float("nan")
-
-        log_result(BenchmarkResult(
-            config_name, ctx_len, None, ttft, tps,
-            device=DEVICE_KIND, prompt_tokens=prompt_tokens, n_new=n_new,
-        ))
-        del llm
+        prompt = make_long_prompt(tokenizer, ctx_len) if ctx_len else PROMPT
+        warmup_hf(model, tokenizer, prompt)
+        ttft, tps, vram, ptok, nnew = measure_hf_generate(model, tokenizer, prompt, max_new_tokens)
+        del model
         gc.collect()
+        empty_cache()
+        return dict(peak_vram_gb=vram, ttft_s=ttft, tokens_per_sec=tps,
+                    prompt_tokens=ptok, n_new=nnew)
+
+    # GGUF
+    from llama_cpp import Llama
+    hint = GGUF_F16_FILENAME_HINT if config == "GGUF_F16" else GGUF_FILENAME_HINT
+    model_path = download_gguf(hint)
+    n_ctx = (ctx_len or 0) + max_new_tokens + 64
+    llm = Llama(model_path=model_path, n_gpu_layers=-1, n_ctx=n_ctx,
+                verbose=False, use_mmap=use_mmap)
+
+    filler = make_long_prompt_gguf(llm, ctx_len) if ctx_len else PROMPT
+    prompt_str = build_chat_prompt_string(tokenizer, filler)
+    ptok = len(llm.tokenize(prompt_str.encode("utf-8"), add_bos=False, special=True))
+
+    # per-shape warmup on the real prompt, then reset so the timed call prefills fresh
+    _ = list(llm(prompt_str, max_tokens=4, temperature=0.0, top_k=1, repeat_penalty=1.0))
+    llm.reset()
+
+    ttft, tps, nnew = measure_gguf_generate(llm, prompt_str, max_new_tokens)
+    del llm
+    gc.collect()
+    return dict(peak_vram_gb=None, ttft_s=ttft, tokens_per_sec=tps,
+                prompt_tokens=ptok, n_new=nnew)
 
 
-def run_perplexity():
-    """Sliding-window perplexity on WikiText-2 (test split), using the exact
-    same dataset/stride/window for FP16 and NF4 so that comparison is
-    apples-to-apples. GGUF perplexity is intentionally NOT computed the same
-    way here -- llama.cpp has its own perplexity implementation, and mixing
-    the two methods would produce numbers that look comparable but aren't.
-    Report this as an explicit limitation (see report/technical_report_template.md).
-    """
+def run_sweep(configs, ctx_lens, repeats=3, max_new_tokens=MAX_NEW_TOKENS,
+              results_path=RESULTS_DIR / "results.jsonl"):
+    """Measure every (config, ctx) pair `repeats` times in randomized order."""
+    tasks = [(c, x) for c in configs for x in ctx_lens]
+    for r in range(repeats):
+        order = list(tasks)
+        random.Random(1000 + r).shuffle(order)   # deterministic, differs per repeat
+        for config, ctx_len in order:
+            if config in HF_CONFIGS and DEVICE_KIND == "cpu":
+                print(f"[{config}] skipped (no GPU backend)")
+                continue
+            try:
+                row = measure_one(config, ctx_len, max_new_tokens)
+            except Exception as e:
+                print(f"[{config}] ctx={ctx_len} rep={r} failed: {e!r}. Skipping.")
+                continue
+            log_result(BenchmarkResult(
+                config, ctx_len, row["peak_vram_gb"], row["ttft_s"], row["tokens_per_sec"],
+                device=DEVICE_KIND, prompt_tokens=row["prompt_tokens"], n_new=row["n_new"],
+                repeat=r, max_new_tokens=max_new_tokens,
+            ), path=results_path)
+
+
+def run_perplexity(results_path=RESULTS_DIR / "results_perplexity.jsonl"):
+    """Sliding-window perplexity on WikiText-2 (test) for FP16 and NF4 with the
+    same dataset/stride/window. Written to its OWN file so the 0.0 speed fields
+    don't pollute per-config speed aggregation of results.jsonl."""
     from datasets import load_dataset
     from transformers import AutoTokenizer, BitsAndBytesConfig
 
-    # "wikitext" (no namespace) is a legacy script-based dataset that the
-    # installed datasets/huggingface_hub versions fail to resolve; the
-    # Salesforce/wikitext parquet mirror has identical content/config.
     dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
     text = "\n\n".join(dataset["text"])
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -482,29 +429,26 @@ def run_perplexity():
 
     model_fp16 = load_causal_lm(MODEL_ID, dtype=torch.float16)
     ppl_fp16 = compute_ppl(model_fp16)
-    log_result(BenchmarkResult("FP16", None, None, 0.0, 0.0, perplexity=ppl_fp16))
+    log_result(BenchmarkResult("FP16", None, None, 0.0, 0.0, perplexity=ppl_fp16,
+                               device=DEVICE_KIND), path=results_path)
     del model_fp16
     gc.collect()
     empty_cache()
 
     if DEVICE_KIND != "cpu":
         bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.float16,
+            load_in_4bit=True, bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.float16,
         )
         try:
             model_nf4 = load_causal_lm(MODEL_ID, quantization_config=bnb_config)
         except Exception as e:
             model_nf4 = None
-            print(
-                f"[NF4] perplexity: bitsandbytes 4-bit failed to load on "
-                f"{DEVICE_KIND} ({e!r}). Skipping NF4 perplexity."
-            )
+            print(f"[NF4] perplexity failed to load on {DEVICE_KIND} ({e!r}). Skipping.")
         if model_nf4 is not None:
             ppl_nf4 = compute_ppl(model_nf4)
-            log_result(BenchmarkResult("NF4_4bit", None, None, 0.0, 0.0, perplexity=ppl_nf4))
+            log_result(BenchmarkResult("NF4_4bit", None, None, 0.0, 0.0, perplexity=ppl_nf4,
+                                       device=DEVICE_KIND), path=results_path)
             del model_nf4
             gc.collect()
             empty_cache()
@@ -514,36 +458,28 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--stage",
-        choices=["all", "fp16", "nf4", "gguf", "gguf_f16", "context_sweep", "perplexity"],
+        choices=["all", "context_sweep", "perplexity"],
         default="all",
     )
+    parser.add_argument("--repeats", type=int, default=3)
     args = parser.parse_args()
 
     try:
-        if args.stage in ("all", "fp16"):
-            run_fp16()
-        if args.stage in ("all", "nf4"):
-            run_nf4()
-        if args.stage in ("all", "gguf"):
-            run_gguf("GGUF_Q4_K_M", GGUF_FILENAME_HINT)
-        if args.stage in ("all", "gguf_f16"):
-            run_gguf("GGUF_F16", GGUF_F16_FILENAME_HINT)
-        if args.stage == "context_sweep":
-            run_fp16(context_sweep=True)
-            run_nf4(context_sweep=True)
-            run_gguf("GGUF_Q4_K_M", GGUF_FILENAME_HINT, context_sweep=True)
-            run_gguf("GGUF_F16", GGUF_F16_FILENAME_HINT, context_sweep=True)
-        if args.stage in ("all", "perplexity"):
+        if args.stage == "all":
+            run_sweep(ALL_CONFIGS, [None], repeats=args.repeats)
+            run_perplexity()
+        elif args.stage == "context_sweep":
+            run_sweep(ALL_CONFIGS, CONTEXT_LENGTHS, repeats=args.repeats)
+        elif args.stage == "perplexity":
             run_perplexity()
     except torch.cuda.OutOfMemoryError:
         print(
-            "CUDA out of memory. Try: smaller MAX_NEW_TOKENS, a shorter max "
-            "CONTEXT_LENGTHS list, or Runtime > Restart session in Colab "
-            "between stages to fully release VRAM."
+            "CUDA out of memory. Try smaller MAX_NEW_TOKENS or a shorter "
+            "CONTEXT_LENGTHS list."
         )
         raise
 
-    print(f"\nAll results appended to {RESULTS_DIR / 'results.jsonl'}")
+    print("\nDone.")
 
 
 if __name__ == "__main__":
