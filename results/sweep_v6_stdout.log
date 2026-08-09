@@ -1,0 +1,132 @@
+# v6 sweep stdout. tqdm "Loading weights" progress-bar redraws stripped (2269 of 2399 lines, zero information — same bar re-rendered); every measurement line and run marker preserved.
+
+############ RUN 1/2 · 24GB control (ballast 0) · 2026-08-08 22:39:29 ############
+total = 1024.00M  used = 132.69M  free = 891.31M  (encrypted)
+[FP16] ctx=128 rep=2 VRAM=7.539200305938721 GB  TTFT=0.529s  decode=8.98 tok/s  ppl=None
+[GGUF_F16] ctx=128 rep=1 VRAM=None GB  TTFT=0.452s  decode=10.06 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=4096 rep=2 VRAM=None GB  TTFT=16.396s  decode=19.80 tok/s  ppl=None
+[NF4_4bit] ctx=2048 rep=1 VRAM=3.290672540664673 GB  TTFT=7.247s  decode=3.06 tok/s  ppl=None
+[FP16] ctx=128 rep=1 VRAM=7.538942813873291 GB  TTFT=0.494s  decode=9.39 tok/s  ppl=None
+[GGUF_F16] ctx=512 rep=0 VRAM=None GB  TTFT=1.685s  decode=10.31 tok/s  ppl=None
+[NF4_4bit] ctx=1024 rep=0 VRAM=3.2939329147338867 GB  TTFT=3.668s  decode=3.15 tok/s  ppl=None
+[FP16] ctx=512 rep=0 VRAM=7.72828483581543 GB  TTFT=1.665s  decode=8.94 tok/s  ppl=None
+[GGUF_F16] ctx=4096 rep=0 VRAM=None GB  TTFT=16.575s  decode=8.88 tok/s  ppl=None
+[GGUF_F16] ctx=1024 rep=1 VRAM=None GB  TTFT=3.362s  decode=10.04 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=1024 rep=2 VRAM=None GB  TTFT=3.728s  decode=26.99 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=128 rep=2 VRAM=None GB  TTFT=0.492s  decode=30.62 tok/s  ppl=None
+[FP16] ctx=4096 rep=2 VRAM=8.219230651855469 GB  TTFT=15.885s  decode=5.33 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=2048 rep=0 VRAM=None GB  TTFT=8.202s  decode=24.00 tok/s  ppl=None
+[GGUF_F16] ctx=2048 rep=0 VRAM=None GB  TTFT=7.610s  decode=9.59 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=128 rep=1 VRAM=None GB  TTFT=0.488s  decode=30.35 tok/s  ppl=None
+[GGUF_F16] ctx=512 rep=1 VRAM=None GB  TTFT=1.709s  decode=10.26 tok/s  ppl=None
+[GGUF_F16] ctx=4096 rep=2 VRAM=None GB  TTFT=17.308s  decode=8.79 tok/s  ppl=None
+[FP16] ctx=512 rep=1 VRAM=7.726945638656616 GB  TTFT=1.666s  decode=8.01 tok/s  ppl=None
+[NF4_4bit] ctx=1024 rep=2 VRAM=3.2770490646362305 GB  TTFT=3.603s  decode=3.21 tok/s  ppl=None
+[FP16] ctx=2048 rep=0 VRAM=7.907063961029053 GB  TTFT=7.078s  decode=1.81 tok/s  ppl=None
+[NF4_4bit] ctx=128 rep=0 VRAM=2.880855083465576 GB  TTFT=0.697s  decode=3.32 tok/s  ppl=None
+[GGUF_F16] ctx=512 rep=2 VRAM=None GB  TTFT=1.646s  decode=10.25 tok/s  ppl=None
+[GGUF_F16] ctx=128 rep=2 VRAM=None GB  TTFT=0.453s  decode=10.54 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=2048 rep=1 VRAM=None GB  TTFT=8.050s  decode=23.95 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=2048 rep=2 VRAM=None GB  TTFT=8.383s  decode=23.52 tok/s  ppl=None
+[GGUF_F16] ctx=4096 rep=1 VRAM=None GB  TTFT=18.096s  decode=7.76 tok/s  ppl=None
+[GGUF_F16] ctx=1024 rep=0 VRAM=None GB  TTFT=4.531s  decode=9.10 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=1024 rep=1 VRAM=None GB  TTFT=3.819s  decode=23.10 tok/s  ppl=None
+[FP16] ctx=4096 rep=1 VRAM=8.222969770431519 GB  TTFT=15.887s  decode=1.59 tok/s  ppl=None
+[FP16] ctx=128 rep=0 VRAM=7.538830041885376 GB  TTFT=0.509s  decode=9.02 tok/s  ppl=None
+[FP16] ctx=512 rep=2 VRAM=7.727323532104492 GB  TTFT=1.691s  decode=5.85 tok/s  ppl=None
+[NF4_4bit] ctx=512 rep=1 VRAM=3.1365227699279785 GB  TTFT=1.894s  decode=3.31 tok/s  ppl=None
+[GGUF_F16] ctx=2048 rep=1 VRAM=None GB  TTFT=7.142s  decode=9.64 tok/s  ppl=None
+[NF4_4bit] ctx=4096 rep=0 VRAM=4.059440851211548 GB  TTFT=15.753s  decode=2.49 tok/s  ppl=None
+[NF4_4bit] ctx=128 rep=2 VRAM=2.880855083465576 GB  TTFT=0.694s  decode=3.34 tok/s  ppl=None
+[FP16] ctx=1024 rep=0 VRAM=8.241573095321655 GB  TTFT=3.276s  decode=8.13 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=512 rep=0 VRAM=None GB  TTFT=1.782s  decode=28.16 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=512 rep=2 VRAM=None GB  TTFT=1.889s  decode=28.29 tok/s  ppl=None
+[NF4_4bit] ctx=512 rep=2 VRAM=3.135111093521118 GB  TTFT=1.895s  decode=3.29 tok/s  ppl=None
+[FP16] ctx=2048 rep=2 VRAM=7.908206462860107 GB  TTFT=7.249s  decode=1.90 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=1024 rep=0 VRAM=None GB  TTFT=3.687s  decode=26.19 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=512 rep=1 VRAM=None GB  TTFT=1.910s  decode=28.21 tok/s  ppl=None
+[FP16] ctx=2048 rep=1 VRAM=7.905726432800293 GB  TTFT=6.809s  decode=2.74 tok/s  ppl=None
+[GGUF_F16] ctx=128 rep=0 VRAM=None GB  TTFT=0.444s  decode=10.45 tok/s  ppl=None
+[GGUF_F16] ctx=1024 rep=2 VRAM=None GB  TTFT=3.279s  decode=10.14 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=4096 rep=0 VRAM=None GB  TTFT=18.189s  decode=19.41 tok/s  ppl=None
+[NF4_4bit] ctx=2048 rep=0 VRAM=3.290672540664673 GB  TTFT=7.788s  decode=3.10 tok/s  ppl=None
+[GGUF_F16] ctx=2048 rep=2 VRAM=None GB  TTFT=7.984s  decode=8.46 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=4096 rep=1 VRAM=None GB  TTFT=23.020s  decode=9.78 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=128 rep=0 VRAM=None GB  TTFT=0.532s  decode=14.08 tok/s  ppl=None
+[NF4_4bit] ctx=4096 rep=1 VRAM=3.9683003425598145 GB  TTFT=17.854s  decode=2.22 tok/s  ppl=None
+[FP16] ctx=4096 rep=0 VRAM=8.219230651855469 GB  TTFT=15.075s  decode=3.65 tok/s  ppl=None
+[FP16] ctx=1024 rep=1 VRAM=8.242920398712158 GB  TTFT=3.276s  decode=7.70 tok/s  ppl=None
+[NF4_4bit] ctx=128 rep=1 VRAM=2.8808560371398926 GB  TTFT=0.692s  decode=3.35 tok/s  ppl=None
+[NF4_4bit] ctx=512 rep=0 VRAM=3.1365227699279785 GB  TTFT=1.890s  decode=3.32 tok/s  ppl=None
+[NF4_4bit] ctx=2048 rep=2 VRAM=3.290672540664673 GB  TTFT=8.172s  decode=2.64 tok/s  ppl=None
+[FP16] ctx=1024 rep=2 VRAM=8.240494966506958 GB  TTFT=3.273s  decode=8.26 tok/s  ppl=None
+[NF4_4bit] ctx=1024 rep=1 VRAM=3.295881986618042 GB  TTFT=3.592s  decode=2.90 tok/s  ppl=None
+[NF4_4bit] ctx=4096 rep=2 VRAM=4.052035808563232 GB  TTFT=16.586s  decode=0.44 tok/s  ppl=None
+Done.
+############ RUN 1 finished 2026-08-08 23:32:29 · rows=      60 ############
+############ RUN 2/2 · 16GB machine (ballast 8) · 2026-08-08 23:32:59 ############
+total = 6144.00M  used = 4406.12M  free = 1737.88M  (encrypted)
+[ballast] holding 8.0GB (~16GB effective machine)
+[FP16] ctx=128 rep=2 VRAM=7.539332866668701 GB  TTFT=0.628s  decode=8.80 tok/s  ppl=None
+[GGUF_F16] ctx=128 rep=1 VRAM=None GB  TTFT=0.442s  decode=10.47 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=4096 rep=2 VRAM=None GB  TTFT=18.199s  decode=19.32 tok/s  ppl=None
+[NF4_4bit] ctx=2048 rep=1 VRAM=3.290672540664673 GB  TTFT=7.873s  decode=2.88 tok/s  ppl=None
+[FP16] ctx=128 rep=1 VRAM=7.539118528366089 GB  TTFT=0.527s  decode=9.02 tok/s  ppl=None
+[GGUF_F16] ctx=512 rep=0 VRAM=None GB  TTFT=1.676s  decode=10.23 tok/s  ppl=None
+[NF4_4bit] ctx=1024 rep=0 VRAM=3.2948784828186035 GB  TTFT=3.752s  decode=3.18 tok/s  ppl=None
+[FP16] ctx=512 rep=0 VRAM=7.727651834487915 GB  TTFT=1.621s  decode=7.65 tok/s  ppl=None
+[GGUF_F16] ctx=4096 rep=0 VRAM=None GB  TTFT=16.142s  decode=8.36 tok/s  ppl=None
+[GGUF_F16] ctx=1024 rep=1 VRAM=None GB  TTFT=3.418s  decode=10.88 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=1024 rep=2 VRAM=None GB  TTFT=3.722s  decode=26.61 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=128 rep=2 VRAM=None GB  TTFT=0.464s  decode=32.13 tok/s  ppl=None
+[FP16] ctx=4096 rep=2 VRAM=8.22403359413147 GB  TTFT=16.118s  decode=3.55 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=2048 rep=0 VRAM=None GB  TTFT=7.681s  decode=25.30 tok/s  ppl=None
+[GGUF_F16] ctx=2048 rep=0 VRAM=None GB  TTFT=7.749s  decode=9.71 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=128 rep=1 VRAM=None GB  TTFT=0.463s  decode=32.12 tok/s  ppl=None
+[GGUF_F16] ctx=512 rep=1 VRAM=None GB  TTFT=1.604s  decode=10.88 tok/s  ppl=None
+[GGUF_F16] ctx=4096 rep=2 VRAM=None GB  TTFT=16.378s  decode=7.69 tok/s  ppl=None
+[FP16] ctx=512 rep=1 VRAM=7.728672027587891 GB  TTFT=1.670s  decode=5.69 tok/s  ppl=None
+[NF4_4bit] ctx=1024 rep=2 VRAM=3.2794904708862305 GB  TTFT=3.430s  decode=3.38 tok/s  ppl=None
+[FP16] ctx=2048 rep=0 VRAM=7.905726432800293 GB  TTFT=6.773s  decode=0.37 tok/s  ppl=None
+[NF4_4bit] ctx=128 rep=0 VRAM=2.880855083465576 GB  TTFT=0.711s  decode=3.24 tok/s  ppl=None
+[GGUF_F16] ctx=512 rep=2 VRAM=None GB  TTFT=1.758s  decode=9.30 tok/s  ppl=None
+[GGUF_F16] ctx=128 rep=2 VRAM=None GB  TTFT=0.449s  decode=10.02 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=2048 rep=1 VRAM=None GB  TTFT=8.683s  decode=22.65 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=2048 rep=2 VRAM=None GB  TTFT=8.891s  decode=18.70 tok/s  ppl=None
+[GGUF_F16] ctx=4096 rep=1 VRAM=None GB  TTFT=31.372s  decode=5.72 tok/s  ppl=None
+[GGUF_F16] ctx=1024 rep=0 VRAM=None GB  TTFT=4.982s  decode=9.16 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=1024 rep=1 VRAM=None GB  TTFT=3.910s  decode=22.78 tok/s  ppl=None
+[FP16] ctx=4096 rep=1 VRAM=8.223427534103394 GB  TTFT=17.038s  decode=0.70 tok/s  ppl=None
+[FP16] ctx=128 rep=0 VRAM=7.539125680923462 GB  TTFT=0.593s  decode=7.80 tok/s  ppl=None
+[FP16] ctx=512 rep=2 VRAM=7.727060556411743 GB  TTFT=1.716s  decode=3.76 tok/s  ppl=None
+[NF4_4bit] ctx=512 rep=1 VRAM=3.1359121799468994 GB  TTFT=1.889s  decode=3.30 tok/s  ppl=None
+[GGUF_F16] ctx=2048 rep=1 VRAM=None GB  TTFT=7.476s  decode=9.73 tok/s  ppl=None
+[NF4_4bit] ctx=4096 rep=0 VRAM=4.014312744140625 GB  TTFT=16.504s  decode=1.53 tok/s  ppl=None
+[NF4_4bit] ctx=128 rep=2 VRAM=2.880855083465576 GB  TTFT=0.718s  decode=3.20 tok/s  ppl=None
+[FP16] ctx=1024 rep=0 VRAM=8.240577220916748 GB  TTFT=3.798s  decode=6.43 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=512 rep=0 VRAM=None GB  TTFT=2.152s  decode=24.62 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=512 rep=2 VRAM=None GB  TTFT=2.196s  decode=20.92 tok/s  ppl=None
+[NF4_4bit] ctx=512 rep=2 VRAM=3.1351113319396973 GB  TTFT=2.843s  decode=2.17 tok/s  ppl=None
+[FP16] ctx=2048 rep=2 VRAM=7.908467531204224 GB  TTFT=8.936s  decode=0.36 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=1024 rep=0 VRAM=None GB  TTFT=3.545s  decode=27.54 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=512 rep=1 VRAM=None GB  TTFT=1.867s  decode=29.08 tok/s  ppl=None
+[FP16] ctx=2048 rep=1 VRAM=7.905726432800293 GB  TTFT=9.467s  decode=0.72 tok/s  ppl=None
+[GGUF_F16] ctx=128 rep=0 VRAM=None GB  TTFT=0.440s  decode=9.92 tok/s  ppl=None
+[GGUF_F16] ctx=1024 rep=2 VRAM=None GB  TTFT=3.334s  decode=10.31 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=4096 rep=0 VRAM=None GB  TTFT=18.421s  decode=17.10 tok/s  ppl=None
+[NF4_4bit] ctx=2048 rep=0 VRAM=3.290672540664673 GB  TTFT=9.287s  decode=2.63 tok/s  ppl=None
+[GGUF_F16] ctx=2048 rep=2 VRAM=None GB  TTFT=8.485s  decode=8.35 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=4096 rep=1 VRAM=None GB  TTFT=22.799s  decode=11.99 tok/s  ppl=None
+[GGUF_Q4_K_M] ctx=128 rep=0 VRAM=None GB  TTFT=0.499s  decode=17.84 tok/s  ppl=None
+[NF4_4bit] ctx=4096 rep=1 VRAM=3.9694502353668213 GB  TTFT=16.734s  decode=1.08 tok/s  ppl=None
+[FP16] ctx=4096 rep=0 VRAM=8.219230651855469 GB  TTFT=17.925s  decode=0.73 tok/s  ppl=None
+[FP16] ctx=1024 rep=1 VRAM=8.242187976837158 GB  TTFT=3.191s  decode=3.35 tok/s  ppl=None
+[NF4_4bit] ctx=128 rep=1 VRAM=2.8808560371398926 GB  TTFT=0.690s  decode=3.34 tok/s  ppl=None
+[NF4_4bit] ctx=512 rep=0 VRAM=3.1365225315093994 GB  TTFT=1.945s  decode=3.09 tok/s  ppl=None
+[NF4_4bit] ctx=2048 rep=2 VRAM=3.290672540664673 GB  TTFT=11.755s  decode=2.16 tok/s  ppl=None
+[FP16] ctx=1024 rep=2 VRAM=8.241530895233154 GB  TTFT=3.405s  decode=6.62 tok/s  ppl=None
+[NF4_4bit] ctx=1024 rep=1 VRAM=3.2963738441467285 GB  TTFT=4.439s  decode=3.09 tok/s  ppl=None
+############ RUN 2 finished 2026-08-09 03:01:06 · rows=     119 ############
+ALL DONE 2026-08-09 03:01:06 · total rows      119 (expect 120)
+/opt/homebrew/Cellar/python@3.12/3.12.13_4/Frameworks/Python.framework/Versions/3.12/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

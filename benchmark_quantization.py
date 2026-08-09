@@ -30,20 +30,32 @@ timing was still wrong):
     already rebuilds per call), cross-measurement allocator fragmentation
     can't accumulate along the context axis, and MPS shape-specific kernel
     compilation is paid before the timed run.
-  * The (config x context) task list is measured in randomized order and
-    repeated N times; report the median and spread rather than a single run.
+  * The (config x context x repeat) task list is shuffled GLOBALLY and measured
+    in that one order; report the median and spread rather than a single run.
+    v5 ran repeats as sequential blocks, which turned out to bias every median:
+    a multi-hour sweep steadily saturates this machine's memory, so throughput
+    drifts down with elapsed time and that drift landed entirely on the last
+    repeat (v3: rep2 -21% vs rep0; v5: -25%). Shuffling repeats together with
+    everything else spreads the drift across all cells, where the median
+    absorbs it instead of inheriting it. Each row now records started_at /
+    ended_at / swap_used_gb so the drift is measurable after the fact.
 
 Usage:
-    python benchmark_quantization.py --stage all [--repeats 3]
-    python benchmark_quantization.py --stage context_sweep [--repeats 3]
+    # caffeinate -i prevents system sleep -- the v5 run slept ~6 of its 8 hours,
+    # and wall-clock timing cannot distinguish that from a slow measurement.
+    caffeinate -i python benchmark_quantization.py --stage context_sweep [--repeats 3]
+    caffeinate -i python benchmark_quantization.py --stage all [--repeats 3]
     python benchmark_quantization.py --stage perplexity
 """
 
 import argparse
 import dataclasses
+import datetime
 import gc
 import json
 import random
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -168,9 +180,73 @@ class BenchmarkResult:
     n_new: Optional[int] = None
     repeat: Optional[int] = None
     max_new_tokens: Optional[int] = None
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    swap_used_gb: Optional[float] = None
+    ballast_gb: Optional[float] = None
 
     def to_dict(self):
         return dataclasses.asdict(self)
+
+
+def now_iso():
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def swap_used_gb():
+    """Current system swap in use, in GB (macOS `sysctl vm.swapusage`).
+
+    Recorded per row so the *effective* memory pressure of a run is on record
+    rather than assumed. (tools/pressure_probe.py has its own copy.)
+    """
+    try:
+        out = subprocess.check_output(["sysctl", "-n", "vm.swapusage"], text=True)
+        # e.g. "total = 6144.00M  used = 5286.38M  free = 857.62M  (encrypted)"
+        used = [tok for tok in out.split() if tok.endswith("M")][1]
+        return round(float(used[:-1]) / 1024, 2)
+    except Exception:
+        return None
+
+
+def total_ram_gb():
+    """Physical RAM in GB (macOS `sysctl hw.memsize`)."""
+    try:
+        out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True)
+        return round(int(out.strip()) / 1024**3)
+    except Exception:
+        return None
+
+
+def start_ballast(gb):
+    """Hold `gb` GB of resident, incompressible memory for the whole run, to
+    benchmark a *smaller machine class* than the host: this M3 Air has 24GB, and
+    the same chip also ships as 16GB and 8GB with identical bandwidth and core
+    counts, so subtracting capacity is a faithful simulation of those configs
+    (8GB ballast ~= a 16GB Mac). Blocks until the fill is resident.
+    (tools/pressure_probe.py has its own copy.)
+    """
+    if gb <= 0:
+        return None
+    proc = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve().parent / "tools" / "ballast.py"),
+         "--gb", str(gb)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    while True:
+        line = proc.stdout.readline()
+        if not line or "filled" in line:
+            break
+    return proc
+
+
+def stop_ballast(proc):
+    if proc is None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 def log_result(result: BenchmarkResult, path: Path = RESULTS_DIR / "results.jsonl"):
@@ -372,26 +448,30 @@ def measure_one(config, ctx_len, max_new_tokens=MAX_NEW_TOKENS, use_mmap=True):
 
 
 def run_sweep(configs, ctx_lens, repeats=3, max_new_tokens=MAX_NEW_TOKENS,
-              results_path=RESULTS_DIR / "results.jsonl"):
-    """Measure every (config, ctx) pair `repeats` times in randomized order."""
-    tasks = [(c, x) for c in configs for x in ctx_lens]
-    for r in range(repeats):
-        order = list(tasks)
-        random.Random(1000 + r).shuffle(order)   # deterministic, differs per repeat
-        for config, ctx_len in order:
-            if config in HF_CONFIGS and DEVICE_KIND == "cpu":
-                print(f"[{config}] skipped (no GPU backend)")
-                continue
-            try:
-                row = measure_one(config, ctx_len, max_new_tokens)
-            except Exception as e:
-                print(f"[{config}] ctx={ctx_len} rep={r} failed: {e!r}. Skipping.")
-                continue
-            log_result(BenchmarkResult(
-                config, ctx_len, row["peak_vram_gb"], row["ttft_s"], row["tokens_per_sec"],
-                device=DEVICE_KIND, prompt_tokens=row["prompt_tokens"], n_new=row["n_new"],
-                repeat=r, max_new_tokens=max_new_tokens,
-            ), path=results_path)
+              results_path=RESULTS_DIR / "results.jsonl", ballast_gb=None):
+    """Measure every (config, ctx) pair `repeats` times in one globally shuffled
+    order, so that run-order drift (this machine saturates its memory over a
+    multi-hour sweep) is spread across all cells rather than concentrated in the
+    last repeat -- see the module docstring."""
+    tasks = [(c, x, r) for r in range(repeats) for c in configs for x in ctx_lens]
+    random.Random(1000).shuffle(tasks)   # deterministic
+    for config, ctx_len, r in tasks:
+        if config in HF_CONFIGS and DEVICE_KIND == "cpu":
+            print(f"[{config}] skipped (no GPU backend)")
+            continue
+        started_at = now_iso()
+        try:
+            row = measure_one(config, ctx_len, max_new_tokens)
+        except Exception as e:
+            print(f"[{config}] ctx={ctx_len} rep={r} failed: {e!r}. Skipping.")
+            continue
+        log_result(BenchmarkResult(
+            config, ctx_len, row["peak_vram_gb"], row["ttft_s"], row["tokens_per_sec"],
+            device=DEVICE_KIND, prompt_tokens=row["prompt_tokens"], n_new=row["n_new"],
+            repeat=r, max_new_tokens=max_new_tokens,
+            started_at=started_at, ended_at=now_iso(), swap_used_gb=swap_used_gb(),
+            ballast_gb=ballast_gb,
+        ), path=results_path)
 
 
 def run_perplexity(results_path=RESULTS_DIR / "results_perplexity.jsonl"):
@@ -462,14 +542,27 @@ def main():
         default="all",
     )
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument(
+        "--ballast-gb", type=float, default=0.0,
+        help="Hold this much resident memory for the whole run to benchmark a "
+             "smaller machine class than the host (on this 24GB M3 Air, 8 "
+             "simulates a 16GB Mac and 16 an 8GB one). Recorded per row.",
+    )
     args = parser.parse_args()
 
+    ballast = start_ballast(args.ballast_gb)
+    if ballast is not None:
+        print(f"[ballast] holding {args.ballast_gb}GB "
+              f"(~{total_ram_gb() - args.ballast_gb:.0f}GB effective machine)",
+              flush=True)
     try:
         if args.stage == "all":
-            run_sweep(ALL_CONFIGS, [None], repeats=args.repeats)
+            run_sweep(ALL_CONFIGS, [None], repeats=args.repeats,
+                      ballast_gb=args.ballast_gb or None)
             run_perplexity()
         elif args.stage == "context_sweep":
-            run_sweep(ALL_CONFIGS, CONTEXT_LENGTHS, repeats=args.repeats)
+            run_sweep(ALL_CONFIGS, CONTEXT_LENGTHS, repeats=args.repeats,
+                      ballast_gb=args.ballast_gb or None)
         elif args.stage == "perplexity":
             run_perplexity()
     except torch.cuda.OutOfMemoryError:
@@ -478,6 +571,8 @@ def main():
             "CONTEXT_LENGTHS list."
         )
         raise
+    finally:
+        stop_ballast(ballast)   # release even on Ctrl-C or a crash
 
     print("\nDone.")
 
