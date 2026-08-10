@@ -1,0 +1,37 @@
+[ppl] WikiText-2 test: 299078 tokens, 584 windows
+Loading weights:   0%|          | 0/398 [00:00<?, ?it/s]Loading weights:   0%|          | 1/398 [00:00<06:14,  1.06it/s]Loading weights:  34%|███▍      | 135/398 [00:01<00:01, 157.79it/s]Loading weights:  44%|████▍     | 176/398 [00:01<00:01, 140.92it/s]Loading weights:  51%|█████▏    | 204/398 [00:01<00:01, 122.37it/s]Loading weights:  56%|█████▋    | 224/398 [00:02<00:01, 112.41it/s]Loading weights:  60%|██████    | 240/398 [00:02<00:01, 116.35it/s]Loading weights:  64%|██████▍   | 256/398 [00:02<00:01, 102.34it/s]Loading weights:  68%|██████▊   | 269/398 [00:02<00:01, 102.89it/s]Loading weights:  71%|███████   | 281/398 [00:02<00:01, 104.73it/s]Loading weights:  74%|███████▎  | 293/398 [00:02<00:00, 107.17it/s]Loading weights:  77%|███████▋  | 305/398 [00:02<00:00, 106.85it/s]Loading weights:  80%|███████▉  | 317/398 [00:02<00:00, 106.33it/s]Loading weights:  83%|████████▎ | 329/398 [00:03<00:00, 107.03it/s]Loading weights:  95%|█████████▍| 377/398 [00:03<00:00, 201.74it/s]Loading weights: 100%|██████████| 398/398 [00:03<00:00, 124.29it/s]
+    window 0 · running ppl 7.240
+    window 100 · running ppl 9.546
+    window 200 · running ppl 9.346
+    window 300 · running ppl 9.058
+    window 400 · running ppl 9.501
+    window 500 · running ppl 9.530
+[ppl] FP16: 9.5413
+[FP16] ctx=None rep=None VRAM=None GB  TTFT=0.000s  decode=0.00 tok/s  ppl=9.541297912597656
+Loading weights:   0%|          | 0/398 [00:00<?, ?it/s]Loading weights:   0%|          | 1/398 [00:00<01:37,  4.09it/s]Loading weights:   1%|          | 3/398 [00:01<03:02,  2.17it/s]Loading weights:   2%|▏         | 9/398 [00:01<00:48,  8.04it/s]Loading weights:   4%|▍         | 16/398 [00:01<00:25, 15.23it/s]Loading weights:   7%|▋         | 26/398 [00:01<00:13, 26.96it/s]Loading weights:   9%|▉         | 36/398 [00:01<00:09, 38.13it/s]Loading weights:  11%|█         | 44/398 [00:01<00:07, 44.88it/s]Loading weights:  13%|█▎        | 51/398 [00:02<00:07, 48.14it/s]Loading weights:  15%|█▍        | 59/398 [00:02<00:06, 53.07it/s]Loading weights:  17%|█▋        | 69/398 [00:02<00:05, 61.03it/s]Loading weights:  19%|█▉        | 77/398 [00:02<00:05, 63.13it/s]Loading weights:  21%|██        | 84/398 [00:02<00:05, 61.87it/s]Loading weights:  23%|██▎       | 92/398 [00:02<00:04, 63.03it/s]Loading weights:  26%|██▌       | 102/398 [00:02<00:04, 68.91it/s]Loading weights:  28%|██▊       | 110/398 [00:02<00:04, 68.92it/s]Loading weights:  30%|██▉       | 118/398 [00:02<00:04, 67.26it/s]Loading weights:  31%|███▏      | 125/398 [00:03<00:04, 65.50it/s]Loading weights:  34%|███▍      | 135/398 [00:03<00:03, 67.23it/s]Loading weights:  36%|███▌      | 142/398 [00:03<00:03, 67.92it/s]Loading weights:  37%|███▋      | 149/398 [00:03<00:03, 62.27it/s]Loading weights:  40%|███▉      | 158/398 [00:03<00:03, 65.81it/s]Loading weights:  42%|████▏     | 168/398 [00:03<00:03, 70.89it/s]Loading weights:  44%|████▍     | 176/398 [00:03<00:03, 70.13it/s]Loading weights:  46%|████▌     | 184/398 [00:03<00:03, 68.16it/s]Loading weights:  48%|████▊     | 191/398 [00:04<00:03, 66.12it/s]Loading weights:  51%|█████     | 201/398 [00:04<00:02, 71.62it/s]Loading weights:  53%|█████▎    | 209/398 [00:04<00:02, 71.04it/s]Loading weights:  55%|█████▍    | 217/398 [00:04<00:02, 68.80it/s]Loading weights:  56%|█████▋    | 224/398 [00:04<00:02, 66.73it/s]Loading weights:  59%|█████▉    | 234/398 [00:04<00:02, 71.97it/s]Loading weights:  61%|██████    | 242/398 [00:04<00:02, 71.30it/s]Loading weights:  63%|██████▎   | 250/398 [00:04<00:02, 69.24it/s]Loading weights:  65%|██████▍   | 257/398 [00:05<00:02, 66.72it/s]Loading weights:  67%|██████▋   | 267/398 [00:05<00:01, 71.85it/s]Loading weights:  69%|██████▉   | 275/398 [00:05<00:01, 71.36it/s]Loading weights:  71%|███████   | 283/398 [00:05<00:01, 65.04it/s]Loading weights:  73%|███████▎  | 290/398 [00:05<00:01, 63.70it/s]Loading weights:  75%|███████▍  | 297/398 [00:05<00:01, 64.52it/s]Loading weights:  76%|███████▋  | 304/398 [00:05<00:01, 58.62it/s]Loading weights:  78%|███████▊  | 312/398 [00:05<00:01, 60.79it/s]Loading weights:  81%|████████  | 322/398 [00:06<00:01, 66.94it/s]Loading weights:  83%|████████▎ | 330/398 [00:06<00:01, 67.60it/s]Loading weights:  85%|████████▍ | 337/398 [00:06<00:00, 64.54it/s]Loading weights:  87%|████████▋ | 345/398 [00:06<00:00, 64.35it/s]Loading weights:  88%|████████▊ | 352/398 [00:06<00:00, 65.78it/s]Loading weights:  90%|█████████ | 359/398 [00:06<00:00, 52.98it/s]Loading weights:  92%|█████████▏| 367/398 [00:06<00:00, 56.70it/s]Loading weights:  95%|█████████▍| 377/398 [00:06<00:00, 60.51it/s]Loading weights:  96%|█████████▋| 384/398 [00:07<00:00, 62.51it/s]Loading weights:  98%|█████████▊| 391/398 [00:07<00:00, 58.53it/s]Loading weights: 100%|██████████| 398/398 [00:07<00:00, 54.97it/s]
+    window 0 · running ppl 7.337
+    window 100 · running ppl 9.790
+    window 200 · running ppl 9.589
+    window 300 · running ppl 9.311
+    window 400 · running ppl 9.761
+    window 500 · running ppl 9.793
+[ppl] NF4_4bit: 9.8060
+[NF4_4bit] ctx=None rep=None VRAM=None GB  TTFT=0.000s  decode=0.00 tok/s  ppl=9.806042671203613
+    window 0 · running ppl 7.241
+    window 100 · running ppl 9.547
+    window 200 · running ppl 9.347
+    window 300 · running ppl 9.058
+    window 400 · running ppl 9.501
+    window 500 · running ppl 9.530
+[ppl] GGUF_F16: 9.5417
+[GGUF_F16] ctx=None rep=None VRAM=None GB  TTFT=0.000s  decode=0.00 tok/s  ppl=9.541733857744102
+    window 0 · running ppl 7.443
+    window 100 · running ppl 9.745
+    window 200 · running ppl 9.550
+    window 300 · running ppl 9.255
+    window 400 · running ppl 9.707
+    window 500 · running ppl 9.732
+[ppl] GGUF_Q4_K_M: 9.7446
+[GGUF_Q4_K_M] ctx=None rep=None VRAM=None GB  TTFT=0.000s  decode=0.00 tok/s  ppl=9.744637741009534
+
+Done.
