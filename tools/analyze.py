@@ -90,6 +90,22 @@ def report_level(d, bal):
             cells.append(f"{m:6.2f} [{lo:5.2f}-{hi:5.2f}]{'' if n >= 3 else f' n={n}':<5}")
         print(f"  {x:>5}  " + "".join(f"{c:<26}" for c in cells))
 
+    print("\n정상 상태 vs 스톨 포함 — 커널이 느린가, 멈추는가")
+    print(f"  {'Config':>14}  " + "".join(f"{x:>16}" for x in CTX))
+    for k, name in CONFIGS:
+        cells = []
+        for x in CTX:
+            p50 = med(d, bal, k, x, "step_ms_p50")
+            tps = med(d, bal, k, x)
+            if p50 is None:
+                cells.append(f"{'—':>16}")   # pre-v7 rows carry no step stats
+            else:
+                cells.append(f"{1000 / p50:6.2f}/{tps:<5.2f}{1000 / p50 / tps:>4.1f}x")
+        print(f"  {name:>14}  " + "".join(f"{c:>16}" for c in cells))
+    print("  각 칸: 정상상태 tok/s (1000/스텝 p50) / 보고된 tok/s (평균) / 스톨 세금 배수.")
+    print("  1.0x면 그 셀은 매끄럽게 돌았다는 뜻이고, 크면 클수록 그 셀의 숫자는")
+    print("  커널이 아니라 몇 번의 멈춤을 보고하고 있습니다.")
+
     print("\n토큰당 절대 지연 증가 128→4096  ('% 저하'가 함정인 이유)")
     for k, name in CONFIGS:
         a, b = 1000 / med(d, bal, k, 128), 1000 / med(d, bal, k, 4096)

@@ -184,6 +184,9 @@ class BenchmarkResult:
     ended_at: Optional[str] = None
     swap_used_gb: Optional[float] = None
     ballast_gb: Optional[float] = None
+    step_ms_p50: Optional[float] = None      # see step_stats(): p50 is the
+    step_ms_p90: Optional[float] = None      # steady-state cost, tokens_per_sec
+    step_ms_max: Optional[float] = None      # is the mean, and they disagree
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -315,6 +318,27 @@ def build_chat_input_ids(tokenizer, model, prompt: str):
 
 # --- HF timing ---------------------------------------------------------------
 
+def step_stats(timestamps):
+    """Per-decode-step latency quantiles, in ms.
+
+    `tokens_per_sec` is n/total, i.e. a MEAN, and this path turns out to stall
+    for whole seconds on a minority of steps -- so the mean reports the stalls,
+    not the kernel. p50 is the steady-state cost (what a kernel comparison
+    wants); the gap between 1000/p50 and tokens_per_sec is the stall tax (what
+    a user actually waits through). Recording both is what makes the FP16
+    @2048 "cliff" auditable instead of arguable: the cliff lives entirely in
+    the mean, p50 is smooth in context length.
+    """
+    gaps = [(b - a) * 1000 for a, b in zip(timestamps, timestamps[1:])]
+    if not gaps:
+        return dict(step_ms_p50=None, step_ms_p90=None, step_ms_max=None)
+    gaps.sort()
+    pick = lambda q: gaps[min(len(gaps) - 1, int(q * len(gaps)))]
+    return dict(step_ms_p50=round(pick(0.50), 2),
+                step_ms_p90=round(pick(0.90), 2),
+                step_ms_max=round(gaps[-1], 2))
+
+
 def measure_hf_generate(model, tokenizer, prompt, max_new_tokens=MAX_NEW_TOKENS):
     """Single generate(); a logits processor stamps a *synced* timestamp per
     decode step so TTFT and decode are separated on the real GPU timeline."""
@@ -344,7 +368,7 @@ def measure_hf_generate(model, tokenizer, prompt, max_new_tokens=MAX_NEW_TOKENS)
     ttft = timestamps[0] - start
     decode_time = timestamps[-1] - timestamps[0] if n_new > 1 else float("nan")
     tps = (n_new - 1) / decode_time if n_new > 1 and decode_time > 0 else float("nan")
-    return ttft, tps, vram, input_ids.shape[1], n_new
+    return ttft, tps, vram, input_ids.shape[1], n_new, step_stats(timestamps)
 
 
 def warmup_hf(model, tokenizer, prompt):
@@ -376,7 +400,7 @@ def measure_gguf_generate(llm, prompt_str, max_new_tokens=MAX_NEW_TOKENS):
     ttft = timestamps[0] - start
     decode_time = timestamps[-1] - timestamps[0] if n_new > 1 else float("nan")
     tps = (n_new - 1) / decode_time if n_new > 1 and decode_time > 0 else float("nan")
-    return ttft, tps, n_new
+    return ttft, tps, n_new, step_stats(timestamps)
 
 
 def download_gguf(filename_hint: str) -> str:
@@ -417,12 +441,13 @@ def measure_one(config, ctx_len, max_new_tokens=MAX_NEW_TOKENS, use_mmap=True):
 
         prompt = make_long_prompt(tokenizer, ctx_len) if ctx_len else PROMPT
         warmup_hf(model, tokenizer, prompt)
-        ttft, tps, vram, ptok, nnew = measure_hf_generate(model, tokenizer, prompt, max_new_tokens)
+        ttft, tps, vram, ptok, nnew, steps = measure_hf_generate(
+            model, tokenizer, prompt, max_new_tokens)
         del model
         gc.collect()
         empty_cache()
         return dict(peak_vram_gb=vram, ttft_s=ttft, tokens_per_sec=tps,
-                    prompt_tokens=ptok, n_new=nnew)
+                    prompt_tokens=ptok, n_new=nnew, **steps)
 
     # GGUF
     from llama_cpp import Llama
@@ -440,11 +465,11 @@ def measure_one(config, ctx_len, max_new_tokens=MAX_NEW_TOKENS, use_mmap=True):
     _ = list(llm(prompt_str, max_tokens=4, temperature=0.0, top_k=1, repeat_penalty=1.0))
     llm.reset()
 
-    ttft, tps, nnew = measure_gguf_generate(llm, prompt_str, max_new_tokens)
+    ttft, tps, nnew, steps = measure_gguf_generate(llm, prompt_str, max_new_tokens)
     del llm
     gc.collect()
     return dict(peak_vram_gb=None, ttft_s=ttft, tokens_per_sec=tps,
-                prompt_tokens=ptok, n_new=nnew)
+                prompt_tokens=ptok, n_new=nnew, **steps)
 
 
 def run_sweep(configs, ctx_lens, repeats=3, max_new_tokens=MAX_NEW_TOKENS,
@@ -471,47 +496,106 @@ def run_sweep(configs, ctx_lens, repeats=3, max_new_tokens=MAX_NEW_TOKENS,
             repeat=r, max_new_tokens=max_new_tokens,
             started_at=started_at, ended_at=now_iso(), swap_used_gb=swap_used_gb(),
             ballast_gb=ballast_gb,
+            step_ms_p50=row["step_ms_p50"], step_ms_p90=row["step_ms_p90"],
+            step_ms_max=row["step_ms_max"],
         ), path=results_path)
 
 
-def run_perplexity(results_path=RESULTS_DIR / "results_perplexity.jsonl"):
-    """Sliding-window perplexity on WikiText-2 (test) for FP16 and NF4 with the
-    same dataset/stride/window. Written to its OWN file so the 0.0 speed fields
-    don't pollute per-config speed aggregation of results.jsonl."""
+def _nll_from_logprobs(logprobs, window, trg_len):
+    """Sum NLL of the last `trg_len` targets of `window`, given per-position
+    log-probabilities. Target w[t] is predicted from position t-1, so the very
+    first token of the corpus is never scored. Returns (nll_sum, n_scored)."""
+    first = max(1, len(window) - trg_len)
+    nll = -sum(float(logprobs[t - 1][window[t]]) for t in range(first, len(window)))
+    return nll, len(window) - first
+
+
+def perplexity_windows(ids, max_length=1024, stride=512):
+    """The sliding-window schedule, yielded as (window_tokens, trg_len) so every
+    backend scores exactly the same targets."""
+    prev_end = 0
+    for begin in range(0, len(ids), stride):
+        end = min(begin + max_length, len(ids))
+        yield ids[begin:end], end - prev_end
+        prev_end = end
+        if end == len(ids):
+            break
+
+
+def compute_ppl_hf(model, ids, log_every=100):
+    import torch.nn.functional as F
+
+    total_nll, total_n = 0.0, 0
+    for i, (window, trg_len) in enumerate(perplexity_windows(ids)):
+        t = torch.tensor([window], device=model.device)
+        with torch.no_grad():
+            logits = model(t).logits[0].float()
+        nll, n = _nll_from_logprobs(F.log_softmax(logits, dim=-1), window, trg_len)
+        total_nll += nll
+        total_n += n
+        if log_every and i % log_every == 0:
+            print(f"    window {i} · running ppl {torch.tensor(total_nll / total_n).exp():.3f}", flush=True)
+    return float(torch.tensor(total_nll / total_n).exp())
+
+
+def compute_ppl_gguf(llm, ids, log_every=100):
+    """Same schedule, same targets, scored by llama.cpp. Requires the Llama to
+    be built with logits_all=True so every position has logits."""
+    import numpy as np
+
+    total_nll, total_n = 0.0, 0
+    for i, (window, trg_len) in enumerate(perplexity_windows(ids)):
+        llm.reset()
+        llm.eval(list(window))
+        scores = np.array(llm._scores, dtype=np.float32)[-len(window):]
+        logprobs = scores - scores.max(-1, keepdims=True)
+        logprobs -= np.log(np.exp(logprobs).sum(-1, keepdims=True))
+        nll, n = _nll_from_logprobs(logprobs, window, trg_len)
+        total_nll += nll
+        total_n += n
+        if log_every and i % log_every == 0:
+            print(f"    window {i} · running ppl {np.exp(total_nll / total_n):.3f}", flush=True)
+    return float(np.exp(total_nll / total_n))
+
+
+def run_perplexity(results_path=RESULTS_DIR / "results_perplexity_v7.jsonl",
+                   max_tokens=None):
+    """Sliding-window perplexity on WikiText-2 (test) for ALL FOUR configs.
+
+    v1-v6 measured this for the HF arm only and declared GGUF "not directly
+    comparable" -- which left the entire llama.cpp arm, where the 2.8x speedup
+    lives, with no quality number at all. It is comparable if you make it so:
+    every config here scores the SAME token id sequence (HF tokenizer), on the
+    same window schedule, through the same _nll_from_logprobs(). What made the
+    old numbers incomparable was using llama.cpp's own perplexity tool, not
+    anything intrinsic.
+
+    Written to its own file (speed fields are 0.0 here and would pollute
+    per-config speed aggregation). The v1 HF numbers are kept in
+    results_perplexity.jsonl -- they used HF's internal loss reduction rather
+    than this scorer, so they are NOT directly comparable to these.
+    """
     from datasets import load_dataset
     from transformers import AutoTokenizer, BitsAndBytesConfig
 
     dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
     text = "\n\n".join(dataset["text"])
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    encodings = tokenizer(text, return_tensors="pt")
+    ids = tokenizer(text).input_ids
+    if max_tokens:
+        ids = ids[:max_tokens]
+    print(f"[ppl] WikiText-2 test: {len(ids)} tokens, "
+          f"{sum(1 for _ in perplexity_windows(ids))} windows", flush=True)
 
-    max_length = 1024
-    stride = 512
+    def record(config, ppl):
+        print(f"[ppl] {config}: {ppl:.4f}", flush=True)
+        log_result(BenchmarkResult(config, None, None, 0.0, 0.0, perplexity=ppl,
+                                   device=DEVICE_KIND, prompt_tokens=len(ids)),
+                   path=results_path)
 
-    def compute_ppl(model):
-        seq_len = encodings.input_ids.size(1)
-        nlls = []
-        prev_end = 0
-        for begin in range(0, seq_len, stride):
-            end = min(begin + max_length, seq_len)
-            trg_len = end - prev_end
-            input_ids = encodings.input_ids[:, begin:end].to(model.device)
-            target_ids = input_ids.clone()
-            target_ids[:, :-trg_len] = -100
-            with torch.no_grad():
-                outputs = model(input_ids, labels=target_ids)
-                nlls.append(outputs.loss * trg_len)
-            prev_end = end
-            if end == seq_len:
-                break
-        return torch.exp(torch.stack(nlls).sum() / prev_end).item()
-
-    model_fp16 = load_causal_lm(MODEL_ID, dtype=torch.float16)
-    ppl_fp16 = compute_ppl(model_fp16)
-    log_result(BenchmarkResult("FP16", None, None, 0.0, 0.0, perplexity=ppl_fp16,
-                               device=DEVICE_KIND), path=results_path)
-    del model_fp16
+    model = load_causal_lm(MODEL_ID, dtype=torch.float16)
+    record("FP16", compute_ppl_hf(model, ids))
+    del model
     gc.collect()
     empty_cache()
 
@@ -521,17 +605,23 @@ def run_perplexity(results_path=RESULTS_DIR / "results_perplexity.jsonl"):
             bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.float16,
         )
         try:
-            model_nf4 = load_causal_lm(MODEL_ID, quantization_config=bnb_config)
+            model = load_causal_lm(MODEL_ID, quantization_config=bnb_config)
         except Exception as e:
-            model_nf4 = None
             print(f"[NF4] perplexity failed to load on {DEVICE_KIND} ({e!r}). Skipping.")
-        if model_nf4 is not None:
-            ppl_nf4 = compute_ppl(model_nf4)
-            log_result(BenchmarkResult("NF4_4bit", None, None, 0.0, 0.0, perplexity=ppl_nf4,
-                                       device=DEVICE_KIND), path=results_path)
-            del model_nf4
+        else:
+            record("NF4_4bit", compute_ppl_hf(model, ids))
+            del model
             gc.collect()
             empty_cache()
+
+    from llama_cpp import Llama
+    for config, hint in [("GGUF_F16", GGUF_F16_FILENAME_HINT),
+                         ("GGUF_Q4_K_M", GGUF_FILENAME_HINT)]:
+        llm = Llama(model_path=download_gguf(hint), n_gpu_layers=-1, n_ctx=1024,
+                    logits_all=True, verbose=False)
+        record(config, compute_ppl_gguf(llm, ids))
+        del llm
+        gc.collect()
 
 
 def main():
@@ -542,6 +632,9 @@ def main():
         default="all",
     )
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--ppl-max-tokens", type=int, default=None,
+                        help="Cap the perplexity corpus (for quick checks; "
+                             "full WikiText-2 test takes hours across 4 configs)")
     parser.add_argument(
         "--ballast-gb", type=float, default=0.0,
         help="Hold this much resident memory for the whole run to benchmark a "
@@ -559,12 +652,12 @@ def main():
         if args.stage == "all":
             run_sweep(ALL_CONFIGS, [None], repeats=args.repeats,
                       ballast_gb=args.ballast_gb or None)
-            run_perplexity()
+            run_perplexity(max_tokens=args.ppl_max_tokens)
         elif args.stage == "context_sweep":
             run_sweep(ALL_CONFIGS, CONTEXT_LENGTHS, repeats=args.repeats,
                       ballast_gb=args.ballast_gb or None)
         elif args.stage == "perplexity":
-            run_perplexity()
+            run_perplexity(max_tokens=args.ppl_max_tokens)
     except torch.cuda.OutOfMemoryError:
         print(
             "CUDA out of memory. Try smaller MAX_NEW_TOKENS or a shorter "
