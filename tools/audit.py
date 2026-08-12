@@ -16,21 +16,26 @@ Checks, per capacity level (rows are grouped by `ballast_gb`):
                        and the slowest cells are listed (thrashing shows here)
   4. Pressure       -- swap range actually experienced, so it is on record
   5. Token sanity   -- n_new in range and prompt_tokens consistent per ctx
+  6. Steady state   -- per-cell CV of step_ms_p50; a cell that swings across
+                       repeats cannot support a single-summary conclusion
 
 Exits non-zero if any hard check fails, so it can gate an analysis step.
 
 Usage:
-    python tools/audit.py [results/results.jsonl] [--repeats 3]
+    python tools/audit.py [results/results.jsonl] [--repeats 5]
 """
 
 import argparse
 import datetime as dt
 import json
 import sys
-from collections import Counter
+import statistics as st
+from collections import Counter, defaultdict
 
 CONFIGS = ("FP16", "NF4_4bit", "GGUF_F16", "GGUF_Q4_K_M")
 GAP_ALERT_S = 120
+CV_WARN = 0.15      # steady-state spread worth flagging
+CV_FAIL = 0.50      # above this, no single summary of the cell is meaningful
 
 
 def ts(s):
@@ -78,6 +83,31 @@ def audit(rows, label, repeats):
         print("  [WARN] 타임스탬프 없음 — 잠자기 오염을 검증할 수 없는 실행입니다 (v5 이전 형식)")
         warns += 1
 
+    # Steady-state stability. A cell whose p50 swings wildly across repeats
+    # cannot support a conclusion drawn from any single summary of it -- this
+    # is the gate that would have caught v7's min-over-repeats estimator, whose
+    # bias scales with exactly this spread.
+    by_cell = defaultdict(list)
+    for r in rows:
+        if r.get("step_ms_p50") is not None:
+            by_cell[(r["config"], r["context_len"])].append(r["step_ms_p50"])
+    cvs = {k: (st.pstdev(v) / st.mean(v)) for k, v in by_cell.items() if len(v) > 1}
+    if cvs:
+        hot = sorted(((c, k) for k, c in cvs.items()), reverse=True)
+        bad = [(c, k) for c, k in hot if c > CV_FAIL]
+        warn = [(c, k) for c, k in hot if CV_WARN < c <= CV_FAIL]
+        status = "FAIL" if bad else ("WARN" if warn else "OK")
+        print(f"  [{status}] 정상상태 분산  셀별 CV(step_ms_p50): "
+              f"FAIL(>{CV_FAIL:.0%}) {len(bad)}건, WARN(>{CV_WARN:.0%}) {len(warn)}건")
+        for c, k in (bad + warn)[:5]:
+            print(f"           {k[0]}@{k[1]}  CV {c:.0%}  "
+                  f"p50 {[round(v, 1) for v in sorted(by_cell[k])]}")
+        fails += bool(bad)
+        warns += bool(warn)
+    else:
+        print("  [WARN] step_ms_p50 없음 — 정상상태 분산을 검사할 수 없는 실행입니다 (v6 이전 형식)")
+        warns += 1
+
     sw = [r["swap_used_gb"] for r in rows if r.get("swap_used_gb") is not None]
     if sw:
         print(f"  [INFO] 스왑        {min(sw):.2f} → {max(sw):.2f} GB "
@@ -97,7 +127,7 @@ def audit(rows, label, repeats):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path", nargs="?", default="results/results.jsonl")
-    ap.add_argument("--repeats", type=int, default=3)
+    ap.add_argument("--repeats", type=int, default=5)
     args = ap.parse_args()
 
     rows = [json.loads(l) for l in open(args.path) if l.strip()]

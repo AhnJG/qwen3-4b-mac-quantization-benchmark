@@ -1,0 +1,27 @@
+# tools/cliff_probe.py --probe sdpa (ctx=2048, rounds=4)
+# 2026-08-12T23:38:08 · device=mps
+
+Qwen3-4B decode attention: q[1,32,1,128] kv[1,8->32,S,128] x 36 layers, fp16 on mps
+
+     seq  default(us)   MATH(us)   ratio   per-token x36 (ms)
+     512        356.0      328.8    0.92                12.81
+    1024        418.1      419.4    1.00                15.05
+    1536        549.5      523.9    0.95                19.78
+    1920        634.4      624.4    0.98                22.84
+    2000        647.1      630.4    0.97                23.30
+    2040        652.8      662.5    1.01                23.50
+    2047        659.0      663.6    1.01                23.72
+    2048        649.7      659.2    1.01                23.39
+    2049        667.4      682.1    1.02                24.03
+    2056        671.6      656.0    0.98                24.18
+    2080        656.5      654.5    1.00                23.63
+    2176        664.6      678.8    1.02                23.93
+    2560        749.4      747.4    1.00                26.98
+    3072        844.2      840.0    1.00                30.39
+    4096       1021.3     1019.6    1.00                36.77
+    4104       1023.4     1015.1    0.99                36.84
+
+  A backend switch at 2048 would show as a step in 'default' that 
+  the neighbouring lengths do not have, or as ratio -> 1.00 there 
+  (default having fallen back to MATH). The last column is the 
+  most attention time a decode step could possibly be spending.

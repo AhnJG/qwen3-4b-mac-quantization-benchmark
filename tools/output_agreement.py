@@ -54,17 +54,33 @@ def divergence(a, b):
             return i
     return None
 
+def divergence_report(a, b):
+    """(first differing index or None, n_compared, len_a, len_b).
+
+    v7's version used zip(), which stops at the shorter stream -- so one output
+    being a prefix of the other printed as "identical". It also never showed how
+    many tokens were actually compared. Both are reported now.
+    """
+    n = min(len(a), len(b))
+    for i in range(n):
+        if a[i] != b[i]:
+            return i, n, len(a), len(b)
+    return (None if len(a) == len(b) else n), n, len(a), len(b)
+
+
 base = "FP16"
 print(f"\n{'비교':<28} " + "  ".join(f"P{i}" for i in range(len(PROMPTS))) + "   요약")
 for cfg in ["GGUF_F16", "NF4_4bit", "GGUF_Q4_K_M"]:
     cells, ident = [], 0
     for i in range(len(PROMPTS)):
-        d = divergence(out[base][i], out[cfg][i])
-        cells.append("동일" if d is None else f"{d:>2}")
+        d, n, la, lb = divergence_report(out[base][i], out[cfg][i])
+        cells.append(f"동일({n})" if d is None else f"{d}/{n}")
         ident += d is None
-    print(f"  {base} vs {cfg:<16} " + "  ".join(f"{c:>2}" for c in cells) +
+    print(f"  {base} vs {cfg:<16} " + "  ".join(f"{c:>8}" for c in cells) +
           f"   {ident}/{len(PROMPTS)} 완전일치")
-print(f"\n(숫자 = {N}토큰 중 처음으로 갈라진 토큰 위치)")
+print(f"\n(a/b = b개 비교 중 a번째에서 갈라짐. '동일(n)' = 길이도 같고 n개 전부 일치)")
+print("주의: GGUF 쪽은 텍스트를 재토크나이즈한 ID라 BPE 왕복이 섞여 있습니다 —")
+print("      두 엔진이 낸 토큰의 직접 비교가 아니라 출력 텍스트 수준의 비교입니다.")
 print("\n--- P0 실제 출력 앞부분 ---")
 for cfg in out:
     print(f"  {cfg:<12} {tok.decode(out[cfg][0])[:90]!r}")

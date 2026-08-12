@@ -1,0 +1,12 @@
+# tools/cliff_probe.py --probe steps (ctx=2048, rounds=4)
+# 2026-08-12T23:38:12 · device=mps
+
+ctx=1024  attn=sdpa  prefill=  3.33s  median=  120.0ms  p10=  117.6  p90=  131.0  max=  168.1  =>  8.33 tok/s
+           per-decile median ms: 123 121 117 118 120 123 125 119 120 120
+ctx=2048  attn=sdpa  prefill=  6.62s  median=  140.6ms  p10=  133.0  p90=  181.5  max= 5712.5  =>  7.11 tok/s
+           per-decile median ms: 132 147 156 158 862 139 135 136 145 139
+ctx=4096  attn=sdpa  prefill= 14.67s  median=  162.3ms  p10=  151.5  p90= 1571.9  max= 5636.6  =>  6.16 tok/s
+           per-decile median ms: 1722 1071 171 158 183 172 171 152 153 152
+
+  Flat deciles with a high median => per-step cost (shape/kernel).
+  Rising deciles or a fat max => state accumulating during decode.

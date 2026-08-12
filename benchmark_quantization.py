@@ -187,6 +187,8 @@ class BenchmarkResult:
     step_ms_p50: Optional[float] = None      # see step_stats(): p50 is the
     step_ms_p90: Optional[float] = None      # steady-state cost, tokens_per_sec
     step_ms_max: Optional[float] = None      # is the mean, and they disagree
+    step_ms: Optional[list] = None           # full per-step array (v8+)
+    schema: Optional[str] = None             # rows without it predate step_ms
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -331,12 +333,21 @@ def step_stats(timestamps):
     """
     gaps = [(b - a) * 1000 for a, b in zip(timestamps, timestamps[1:])]
     if not gaps:
-        return dict(step_ms_p50=None, step_ms_p90=None, step_ms_max=None)
-    gaps.sort()
-    pick = lambda q: gaps[min(len(gaps) - 1, int(q * len(gaps)))]
+        return dict(step_ms_p50=None, step_ms_p90=None, step_ms_max=None,
+                    step_ms=None)
+    ordered = sorted(gaps)
+    pick = lambda q: ordered[min(len(ordered) - 1, int(q * len(ordered)))]
     return dict(step_ms_p50=round(pick(0.50), 2),
                 step_ms_p90=round(pick(0.90), 2),
-                step_ms_max=round(gaps[-1], 2))
+                step_ms_max=round(ordered[-1], 2),
+                # the whole array, in generation order. Three summary values
+                # turned out not to be enough: with only p50/p90/max on record
+                # there is no way to ask, after the fact, whether a cell's
+                # spread is sampling noise or structure -- which is how v7 came
+                # to lean on a min-over-repeats estimator that a later review
+                # retracted as biased. ~1.5KB/row buys every other estimator
+                # (trimmed mean, low percentiles, bootstrap CIs) forever.
+                step_ms=[round(g, 2) for g in gaps])
 
 
 def measure_hf_generate(model, tokenizer, prompt, max_new_tokens=MAX_NEW_TOKENS):
@@ -497,7 +508,8 @@ def run_sweep(configs, ctx_lens, repeats=3, max_new_tokens=MAX_NEW_TOKENS,
             started_at=started_at, ended_at=now_iso(), swap_used_gb=swap_used_gb(),
             ballast_gb=ballast_gb,
             step_ms_p50=row["step_ms_p50"], step_ms_p90=row["step_ms_p90"],
-            step_ms_max=row["step_ms_max"],
+            step_ms_max=row["step_ms_max"], step_ms=row.get("step_ms"),
+            schema="v8",
         ), path=results_path)
 
 

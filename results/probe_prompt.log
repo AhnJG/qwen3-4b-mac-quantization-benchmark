@@ -1,0 +1,15 @@
+# tools/cliff_probe.py --probe prompt (ctx=2048, rounds=4)
+# 2026-08-12T23:38:05 · device=mps
+
+FILLER_TEXT = 31 tokens; ctx targets are multiples of it only by accident
+
+    ctx  filler    fed  retok  uniq  U+FFFD  period     periodic   maxid
+    128     128    136    136    31       0      30            -  151645
+    512     512    520    520    31       0      30            -  151645
+   1024    1024   1032   1032    31       0      30            -  151645
+   2048    2048   2056   2056    31       0      30            -  151645
+   4096    4096   4104   4104    31       0      30            -  151645
+
+  chat-template overhead per ctx: {128: 8, 512: 8, 1024: 8, 2048: 8, 4096: 8}
+
+  => 2048 is constructed exactly like its neighbours.

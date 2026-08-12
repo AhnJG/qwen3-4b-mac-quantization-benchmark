@@ -47,6 +47,8 @@ Usage:
 """
 
 import argparse
+import contextlib
+import datetime
 import statistics as st
 import sys
 import time
@@ -428,14 +430,18 @@ def probe_residue(ctx=2048, n_new=150, rounds=4):
         empty_cache, load_causal_lm, measure_hf_generate, warmup_hf,
     )
 
-    gb = lambda: torch.mps.driver_allocated_memory() / 2**30
+    # bytes, not GB: at {:.2f}G resolution any per-measurement residue under
+    # ~10MB prints as 0.00, which is indistinguishable from "no residue" over
+    # the 100 measurements a real sweep does.
+    raw = torch.mps.driver_allocated_memory
+    gb = lambda: raw() / 2**30
     tok = AutoTokenizer.from_pretrained(MODEL_ID)
     base = gb()
     print(f"시작 driver 보유: {base:.2f} GB\n")
     print(f"  {'회차':>4} {'로드후':>9} {'생성후':>9} {'해제후':>9} "
-          f"{'생성중 증가':>12} {'회수못한 잔여':>14}")
+          f"{'생성중 증가':>12} {'회수못한 잔여':>16}")
 
-    prev = base
+    prev, residues, peak = base, [], 0.0
     for r in range(rounds):
         model = load_causal_lm(MODEL_ID, dtype=torch.float16)
         after_load = gb()
@@ -448,14 +454,42 @@ def probe_residue(ctx=2048, n_new=150, rounds=4):
         empty_cache()
         after_free = gb()
         print(f"  {r:>4} {after_load:>8.2f}G {after_gen:>8.2f}G {after_free:>8.2f}G "
-              f"{after_gen - after_load:>11.2f}G {after_free - prev:>13.2f}G")
+              f"{after_gen - after_load:>11.2f}G {(after_free - prev) * 1024:>10.1f} MB")
+        residues.append(after_free - prev)
+        peak = max(peak, after_gen)
         prev = after_free
 
-    print(f"\n  {rounds}회 누적 잔여: {prev - base:.2f} GB "
-          f"(측정당 {(prev - base) / rounds * 1024:.0f} MB)")
-    print("  측정당 잔여가 0에 가까우면 스윕 포화의 원인은 torch 할당자가 아니라"
-          "\n  파일 페이지 캐시 쪽입니다(README Limitations의 기존 설명). 잔여가"
-          "\n  쌓이면 기존 설명을 바꿔야 합니다.")
+    # Report the first round separately: it establishes the pool and dominates
+    # any average that includes it, which would read as "N MB leaked per
+    # measurement" when in fact nothing accumulates after the first.
+    first = residues[0]
+    rest = residues[1:]
+    print(f"\n  1회차 잔여 (풀 확보):     {first * 1024:>9.0f} MB")
+    if rest:
+        print(f"  2회차 이후 측정당 잔여:   {sum(rest) / len(rest) * 1024:>9.1f} MB "
+              f"(범위 {min(rest) * 1024:+.0f} ~ {max(rest) * 1024:+.0f} MB, n={len(rest)})")
+    print(f"  최종 driver 보유:         {prev:>9.2f} GB   생성 중 최고 {peak:.2f} GB")
+    print("\n  2회차 이후 잔여가 0 근처면 이것은 누수가 아니라 **되돌아오지 않는 고원**"
+          "\n  입니다. 스윕이 시간에 따라 포화된다는 서술의 근거가 되지 못하며,"
+          "\n  실제로 스윕 기록의 스왑도 측정 순서와 무상관입니다(README Limitations).")
+
+
+class _Tee:
+    """Write to stdout and a log at once. Probe output IS the evidence for the
+    causal claims in the README, so it has to survive the terminal -- the v7
+    review's predicted next defect was exactly that none of it was archived."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, s):
+        for st_ in self.streams:
+            st_.write(s)
+            st_.flush()
+
+    def flush(self):
+        for st_ in self.streams:
+            st_.flush()
 
 
 def main():
@@ -466,12 +500,35 @@ def main():
                     required=True)
     ap.add_argument("--ctx", type=int, default=2048,
                     help="--probe alloc / --probe residue only")
+    ap.add_argument("--rounds", type=int, default=4,
+                    help="--probe residue only: how many load/generate/free "
+                         "cycles to replay")
+    ap.add_argument("--log", default=None,
+                    help="default results/probe_<name>.log; '-' to disable")
     args = ap.parse_args()
-    if args.probe in ("alloc", "residue"):
-        {"alloc": probe_alloc, "residue": probe_residue}[args.probe](ctx=args.ctx)
-        return
-    {"prompt": probe_prompt, "sdpa": probe_sdpa, "steps": probe_steps,
-     "cache": probe_cache}[args.probe]()
+
+    log = args.log or f"results/probe_{args.probe}.log"
+    out = contextlib.nullcontext(sys.stdout)
+    if log != "-":
+        Path(log).parent.mkdir(parents=True, exist_ok=True)
+        out = open(log, "w")
+    try:
+        sink = sys.stdout if log == "-" else _Tee(sys.stdout, out)
+        with contextlib.redirect_stdout(sink):
+            print(f"# tools/cliff_probe.py --probe {args.probe} "
+                  f"(ctx={args.ctx}, rounds={args.rounds})")
+            print(f"# {datetime.datetime.now().isoformat(timespec='seconds')} "
+                  f"· device={__import__('benchmark_quantization').DEVICE_KIND}\n")
+            if args.probe == "alloc":
+                probe_alloc(ctx=args.ctx)
+            elif args.probe == "residue":
+                probe_residue(ctx=args.ctx, rounds=args.rounds)
+            else:
+                {"prompt": probe_prompt, "sdpa": probe_sdpa,
+                 "steps": probe_steps, "cache": probe_cache}[args.probe]()
+    finally:
+        if log != "-":
+            out.close()
 
 
 if __name__ == "__main__":

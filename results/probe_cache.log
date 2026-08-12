@@ -1,0 +1,22 @@
+# tools/cliff_probe.py --probe cache (ctx=2048, rounds=4)
+# 2026-08-12T23:42:22 · device=mps
+
+  ran ctx=4096 dynamic  rep1  p50=  159.6  max=  3064.9  tok/s= 4.77
+  ran ctx=4096 static   rep1  p50=  353.9  max=   676.4  tok/s= 2.79
+  ran ctx=4096 dynamic  rep0  p50=  158.9  max=  2729.1  tok/s= 3.59
+  ran ctx=2048 dynamic  rep1  p50=  137.7  max=  2003.4  tok/s= 3.13
+  ran ctx=2048 dynamic  rep0  p50=  137.0  max=  4889.8  tok/s= 2.54
+  ran ctx=4096 static   rep0  p50=  348.0  max=   546.0  tok/s= 2.81
+  ran ctx=2048 static   rep0  p50=  242.7  max=   278.6  tok/s= 4.10
+  ran ctx=2048 static   rep1  p50=  249.6  max=   266.0  tok/s= 4.09
+
+    ctx     cache   p50(ms)   p90(ms)   max(ms)   tok/s      스톨세금   VRAM(GB)
+   2048   dynamic     137.4     979.2    3446.6    2.84     2.57x       7.91
+   2048    static     246.2     259.3     272.3    4.10     0.99x       8.03
+   4096   dynamic     159.3     237.7    2897.0    4.18     1.50x       8.22
+   4096    static     351.0     377.2     611.2    2.80     1.02x      10.01
+
+  static의 max가 p90 수준으로 내려오고 스톨 세금이 1.0x에 붙으면
+  스톨의 정체는 KV 캐시 재할당입니다. p50은 거의 그대로여야 합니다
+  (정상 상태 커널 비용은 캐시 구현과 무관) -- 그렇지 않다면 static이
+  다른 커널 경로를 타는 것이므로 비교 자체가 오염된 것입니다.
