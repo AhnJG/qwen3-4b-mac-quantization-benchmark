@@ -1,7 +1,7 @@
 """
 tools/analyze.py
 
-Regenerate every number quoted in README.md and report/ from a results file,
+Regenerate every number quoted in README.md from a results file,
 so the report is reproducible from the raw data by one command rather than by
 trusting numbers someone typed once.
 
