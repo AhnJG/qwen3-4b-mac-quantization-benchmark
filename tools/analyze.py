@@ -23,6 +23,7 @@ Usage:
 import argparse
 import json
 import math
+import random
 import statistics as st
 from collections import defaultdict
 
@@ -63,6 +64,41 @@ def med(d, bal, cfg, ctx, key="tokens_per_sec"):
 def spread(d, bal, cfg, ctx):
     v = [r["tokens_per_sec"] for r in d.get((bal, cfg, ctx), [])]
     return (min(v), max(v), len(v)) if v else (None, None, 0)
+
+
+def vals(d, bal, cfg, ctx, key="step_ms_p50"):
+    """Every repeat's value for one cell, unsummarised."""
+    return [r[key] for r in d.get((bal, cfg, ctx), []) if r.get(key) is not None]
+
+
+def increase(d, bal, cfg, agg):
+    """128->4096 absolute ms/token increase, summarised by `agg` over repeats."""
+    a, b = vals(d, bal, cfg, 128), vals(d, bal, cfg, 4096)
+    return agg(b) - agg(a) if a and b else None
+
+
+def boot_gap(d, bal, c1, c2, agg, n=20000, seed=0):
+    """95% CI for the *difference* between two configs' 128->4096 increases.
+
+    Resamples each cell's repeats with replacement. Exists because the pair
+    "agreement" this report once claimed turned out to be an artifact of which
+    summary was used, and a point estimate alone cannot show that -- the CI on
+    the gap includes zero. Seeded so the printed interval is reproducible.
+    """
+    rnd = random.Random(seed)
+    cells = {c: {x: vals(d, bal, c, x) for x in (128, 4096)} for c in (c1, c2)}
+    if not all(cells[c][x] for c in (c1, c2) for x in (128, 4096)):
+        return None, None
+    out = []
+    for _ in range(n):
+        inc = {}
+        for c in (c1, c2):
+            lo = agg(rnd.choices(cells[c][128], k=len(cells[c][128])))
+            hi = agg(rnd.choices(cells[c][4096], k=len(cells[c][4096])))
+            inc[c] = hi - lo
+        out.append(inc[c1] - inc[c2])
+    out.sort()
+    return out[int(0.025 * n)], out[int(0.975 * n)]
 
 
 def ratio_across_ctx(d, bal, num, den):
@@ -147,11 +183,26 @@ def report_level(d, bal):
         print(f"  {name:>14}  " + "".join(f"{c:>9}" for c in cells))
     print("  스톨 세금과 달리 이 열은 '멈춘 횟수'가 아니라 '멈춤의 크기'를 봅니다.")
 
-    print("\n토큰당 절대 지연 증가 128→4096  ('% 저하'가 함정인 이유)")
+    print("\n토큰당 절대 지연 증가 128→4096 — 추정량을 바꿔가며")
+    print(f"  {'Config':<14}{'평균 기반':>11}{'p50 중앙값':>12}{'p50 평균':>11}"
+          f"{'p50 최솟값':>12}")
     for k, name in CONFIGS:
-        a, b = 1000 / med(d, bal, k, 128), 1000 / med(d, bal, k, 4096)
-        pct = (med(d, bal, k, 4096) - med(d, bal, k, 128)) / med(d, bal, k, 128) * 100
-        print(f"  {name:<14}{a:8.1f} → {b:9.1f} ms   증가 +{b - a:8.1f} ms   (%로는 {pct:+.0f}%)")
+        mean_based = 1000 / med(d, bal, k, 4096) - 1000 / med(d, bal, k, 128)
+        cols = [mean_based] + [increase(d, bal, k, f) for f in (st.median, st.mean, min)]
+        cells = "".join(f"{'—':>11}" if c is None else f"{c:>+10.1f} " for c in cols)
+        print(f"  {name:<14}{cells}")
+    print("  마지막 열(p50 최솟값)은 v7이 쓰다 v7.1에서 편향으로 **철회한** 추정량입니다.")
+    print("  결론에 쓰지 마십시오 — 다른 열과 나란히 두어 비교하기 위해서만 인쇄합니다.")
+
+    print("\n  같은 엔진 안 두 정밀도의 격차와 95% CI (부트스트랩 20,000회)")
+    for c1, c2, label in [("FP16", "NF4_4bit", "HF 쌍"),
+                          ("GGUF_F16", "GGUF_Q4_K_M", "GGUF 쌍")]:
+        for agg, aname in ((st.median, "p50 중앙값"), (min, "p50 최솟값")):
+            g = increase(d, bal, c1, agg) - increase(d, bal, c2, agg)
+            lo, hi = boot_gap(d, bal, c1, c2, agg)
+            mark = "  ← 0을 포함, 판정 불가" if lo is not None and lo <= 0 <= hi else ""
+            print(f"    {label} · {aname:<10} 격차 {g:>+6.1f} ms   "
+                  f"CI [{lo:>+6.1f}, {hi:>+6.1f}]{mark}")
 
     print("\n150토큰 생성 전체 소요 (프리필 포함, 초)")
     print(f"  {'Config':<14}" + "".join(f"{x:>9}" for x in CTX))

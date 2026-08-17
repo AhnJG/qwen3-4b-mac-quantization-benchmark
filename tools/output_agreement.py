@@ -1,7 +1,7 @@
 """Do the four configs actually answer the same? Perplexity is an aggregate;
 it can be identical while outputs diverge. Greedy-decode the same prompts on
 all four and measure where they first differ."""
-import sys, gc, json
+import sys, gc
 sys.path.insert(0, ".")
 import torch, benchmark_quantization as bq
 from transformers import AutoTokenizer, BitsAndBytesConfig

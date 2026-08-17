@@ -643,7 +643,7 @@ def main():
         choices=["all", "context_sweep", "perplexity"],
         default="all",
     )
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--ppl-max-tokens", type=int, default=None,
                         help="Cap the perplexity corpus (for quick checks; "
                              "full WikiText-2 test takes hours across 4 configs)")
