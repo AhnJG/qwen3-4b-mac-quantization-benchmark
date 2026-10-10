@@ -19,7 +19,10 @@ Checks, per capacity level (rows are grouped by `ballast_gb`):
   6. Steady state   -- per-cell CV of step_ms_p50; a cell that swings across
                        repeats cannot support a single-summary conclusion
 
-Exits non-zero if any hard check fails, so it can gate an analysis step.
+Exits non-zero if any integrity check fails (sleep gaps, token counts), so it
+can gate an analysis step. The steady-state spread gate is reported separately:
+a cell that fails it is real data, but no single summary of it should carry a
+conclusion.
 
 Usage:
     python tools/audit.py [results/results.jsonl] [--repeats 5]
@@ -44,7 +47,7 @@ def ts(s):
 
 def audit(rows, label, repeats):
     """Return (n_failures, n_warnings) after printing a report for one level."""
-    fails = warns = 0
+    fails = warns = vfails = 0
     rows = sorted(rows, key=lambda r: r["started_at"] or "")
     print(f"\n{'=' * 74}\n{label} — {len(rows)} rows\n{'=' * 74}")
 
@@ -102,7 +105,7 @@ def audit(rows, label, repeats):
         for c, k in (bad + warn)[:5]:
             print(f"           {k[0]}@{k[1]}  CV {c:.0%}  "
                   f"p50 {[round(v, 1) for v in sorted(by_cell[k])]}")
-        fails += bool(bad)
+        vfails += bool(bad)
         warns += bool(warn)
     else:
         print("  [WARN] step_ms_p50 없음 — 정상상태 분산을 검사할 수 없는 실행입니다 (v6 이전 형식)")
@@ -121,7 +124,7 @@ def audit(rows, label, repeats):
     print(f"  [{'FAIL' if bad_n or incons else 'OK'}] 토큰 정합성  "
           f"n_new 이상 {len(bad_n)}건, prompt_tokens 불일치 {incons or '없음'}")
     fails += bool(bad_n or incons)
-    return fails, warns
+    return fails, warns, vfails
 
 
 def main():
@@ -133,18 +136,24 @@ def main():
     rows = [json.loads(l) for l in open(args.path) if l.strip()]
     levels = sorted({r.get("ballast_gb") for r in rows}, key=lambda x: (x is not None, x))
 
-    total_f = total_w = 0
+    total_f = total_w = total_v = 0
     for lv in levels:
         sub = [r for r in rows if r.get("ballast_gb") == lv]
         label = "24GB (ballast 없음)" if lv in (None, 0.0) else f"ballast {lv}GB (= {24 - lv:.0f}GB 기계)"
-        f, w = audit(sub, label, args.repeats)
+        f, w, v = audit(sub, label, args.repeats)
         total_f += f
         total_w += w
+        total_v += v
 
     print(f"\n{'=' * 74}")
-    print(f"결과: {len(rows)}행 · 실패 {total_f} · 경고 {total_w}")
-    print("실패가 0이 아니면 이 데이터로 결론을 내리지 마십시오." if total_f
-          else "감사 통과 — 분석에 사용 가능합니다.")
+    print(f"결과: {len(rows)}행 · 무결성 실패 {total_f} · 분산 실패 {total_v} · 경고 {total_w}")
+    if total_f:
+        print("무결성 실패가 있습니다 — 이 데이터로 결론을 내리지 마십시오.")
+    elif total_v:
+        print("무결성 감사 통과 — 분석에 사용 가능합니다.\n"
+              "단, 분산 FAIL 셀은 반복 간 p50이 크게 흔들리므로 단일 요약값으로 결론을 내리지 마십시오.")
+    else:
+        print("감사 통과 — 분석에 사용 가능합니다.")
     sys.exit(1 if total_f else 0)
 
 

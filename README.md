@@ -1,486 +1,131 @@
-# Efficient AI: On-Device Quantization Benchmark (Qwen3-4B-Instruct)
+# On-Device LLM Quantization Benchmark — Qwen3-4B on Apple Silicon
 
-> **Status: v7.** 측정 코드의 결함을 다섯 번 잡아 여기까지 왔습니다. v1 이중 `generate()`(prefill이 처리량에 혼입) → v2 그 수정이 또 틀림(MPS 비동기 때문에 `time.time()`이 GPU 완료가 아닌 CPU 도달 시각을 찍어 prefill 재누출) → v3 `sync_device()`로 실측 검증 후 수정 → v4 ballast 도구 수정 후 mmap 가설 재확인 → v6 반복 블록 배치가 모든 중앙값을 편향(전역 셔플로 수정) → **v7에서 다섯 번째 결함을 잡았습니다: 결함은 코드가 아니라 지표 자체였습니다.**
->
-> `tokens_per_sec = 토큰수 / 총시간`은 **평균**입니다. HF 경로는 150스텝 중 소수의 스텝에서 수 초씩 멈추는데(KV 캐시를 매 스텝 재할당하느라 생성마다 driver 메모리가 물리 RAM 한계까지 차오름), 평균은 그 멈춤을 보고할 뿐 커널을 보고하지 않습니다. v3부터 네 번 재현되며 "FP16 @2048 비단조 절벽"으로 불리던 현상의 대부분이 이것이었습니다 — **스텝별 중앙값으로 보면 4.3배가 1.28배가 됩니다**([해소된 미스터리](#왜-이렇게-쟀는가--지표-선택이-결론을-만든-기록)).
->
-> v7은 모든 행에 **스텝별 지연 p50/p90/max를 기록**합니다. 그래서 이제 모든 셀에서 "커널이 느린가"와 "멈춰 있었는가"가 분리되고, 40개 셀 중 스톨 세금이 1.15배를 넘는 9개가 **전부 HF**임이 드러납니다. 표본도 3회 → **5회**로 늘렸습니다.
->
-> 용량 축(24GB 대조군 / 16GB = ballast 8GB)은 v6에서 도입해 유지합니다([16GB](#16gb-실제-사람들이-쓰는-기계)).
->
-> 모든 결과 행에 `started_at`/`ended_at`/`swap_used_gb`/`ballast_gb`/`step_ms_p50`/`step_ms_p90`/`step_ms_max`가 기록되어 **사후 감사가 가능합니다**. 이전 버전 데이터는 `results/*_v1_*.jsonl`, `*_v2_*.jsonl`, `*_v5_*.jsonl`, `results_v6.jsonl`에 감사 기록으로 보존.
+[한국어](README.ko.md)
 
-## TL;DR
+A controlled 2×2 comparison of **inference engine × weight precision** for `Qwen/Qwen3-4B-Instruct-2507` on an Apple M3 MacBook Air, at two memory capacities (24GB, and a 16GB machine simulated by pinning 8GB). The current dataset is **200 audited runs** (4 configs × 5 context lengths × 2 capacities × 5 repeats). Every table and figure is regenerated from the raw rows by one command.
 
-> `Qwen3-4B-Instruct-2507`을 2×2 격자(HF/llama.cpp 엔진 × FP16/4-bit)로, **24GB와 16GB 두 용량에서** 비교했다.
->
-> **① 같은 4비트가 정반대로 움직인다 — 가장 견고한 결과**: llama.cpp의 K-quant는 F16 대비 **2.58배 빨라지는데**, bitsandbytes NF4는 같은 4비트인데 FP16 대비 **2.48배 느려진다**(0.40배). K-quant는 디퀀타이즈+행렬곱을 융합한 추론 전용 커널인 반면, NF4는 QLoRA *학습*의 메모리 절감이 목적이라 디퀀타이즈 오버헤드가 대역폭 절감분을 상쇄한다(추정, 프로파일링 미수행). **품질은 오히려 K-quant가 낫다** — WikiText-2 perplexity 9.7446 vs 9.8060(F16 대비 +2.13% vs +2.77%). 속도·품질 두 축 모두에서 지므로, 추론에서 NF4를 고를 이유가 이 격자 안에는 없다. 5개 컨텍스트 × 2개 용량 × 모든 추정량에서 유지되는 유일한 결과다.
->
-> 여기서 **가중치 크기는 순위를 정하지 못한다.** 가중치 2.9GB의 HF NF4는 가중치 8GB의 GGUF F16보다 **3.3배 느리고**, 이 격차는 용량과 무관하게 유지된다(24GB 3.25~3.37배, 16GB 3.21~3.39배 — 정상 상태 기준). 즉 **양자화 포맷의 커널 지원이 가중치 크기를 지배한다.** 메모리 압박은 이 격차를 *만들지* 않고 스톨을 통해 *증폭*할 뿐이다 — 같은 비를 평균 처리량으로 보면 16GB @4096에서만 3.4배가 **8.1배**로 벌어진다.
->
-> **② 엔진 vs 양자화 분리**: 같은 정밀도에서 llama.cpp 엔진의 이점은 **1.27배**(컨텍스트별 1.16~1.49), 같은 llama.cpp 안에서 K-quant 양자화는 **2.58배** — "GGUF가 3.3배 빠르다"의 실체는 엔진이 아니라 양자화다. 다만 엔진의 진짜 값어치는 자기 1.27배가 아니라 **4비트가 실제로 이득이 되는 유일한 곳이라는 점**이다(①). 정상 상태 속도비의 기하평균이며, 단일 컨텍스트 값을 대표로 쓰지 않는 이유는 [분해 표](#엔진-효과-vs-양자화-효과)에 적었다.
->
-> **③ 컨텍스트 비용은 정밀도와 무관해 보인다 — 단, 네 셀 중 둘만 견고하다**: 128→4096 토큰당 절대 지연 증가는 **같은 엔진 안에서 두 정밀도가 일치**한다는 roofline 예측을 따른다(KV 캐시 증가분은 가중치 정밀도와 무관하므로). 그러나 **이 일치는 추정량에 따라 성립하기도 하고 안 하기도 한다.** 24GB HF 쌍(+42.1/+41.9, 어느 추정량으로도 유지)과 16GB GGUF 쌍(+16.5/+16.2, 마찬가지)은 견고하고, **24GB GGUF 쌍과 16GB HF 쌍은 판정 불가**다 — 전자는 추정량에 따라 격차가 0.9~12.7ms로 갈리고 부트스트랩 95% CI가 [−3.5, +17.5]다. [상세](#context-length-scaling)
->
-> **④ 부수 발견 — transformers/MPS의 메모리 거동**: **Qwen3-4B FP16(가중치 8GB)** 경로는 150토큰 생성 한 번에 driver 보유 메모리를 **24.9GB(= 이 기계의 물리 RAM 전량)**까지 밀어 올리고, 첫 생성이 만든 **16.35GB 풀은 `del model` + `gc.collect()` + `torch.mps.empty_cache()` 이후에도 반환되지 않는다**(4회차까지 관측). llama.cpp는 이 풀을 만들지 않는다. **범위 주의**: 프로브는 FP16 한 설정만 돌렸고, 같은 transformers/MPS 경로인 NF4(가중치 2.9GB)는 24GB에서 5구간 중 4구간이 조용하다 — 관측된 것은 "transformers 일반"이 아니라 **"큰 상주 가중치 + transformers"**의 현상일 가능성이 높다. 재현: `python tools/cliff_probe.py --probe residue`.
->
-> **위 숫자들은 `tokens_per_sec`가 아니라 스텝 지연 p50으로 계산했습니다.** 그 이유 — 그리고 그러지 않았을 때 이 저장소가 다섯 판본에 걸쳐 존재하지 않는 "절벽"을 네 번 재현한 경위 — 는 [왜 이렇게 쟀는가](#왜-이렇게-쟀는가--지표-선택이-결론을-만든-기록)에 있습니다. 새 발견이 아니라 **알려진 처방을 뒤늦게 적용한 기록**입니다.
->
-> 자세히는 [Results](#results) · [Context-length scaling](#context-length-scaling) · [16GB](#16gb-실제-사람들이-쓰는-기계) · [Memory pressure](#memory-pressure-ballast-실험).
-
-## What this is
-
-`Qwen/Qwen3-4B-Instruct-2507`을 네 설정으로 실행해 정량 비교합니다. GGUF F16을 넣은 이유는 "엔진 효과"와 "양자화 효과"를 분리하기 위해서입니다 — 그러지 않으면 "GGUF Q4_K_M vs HF FP16"에서 엔진과 정밀도가 동시에 바뀌어 원인을 가를 수 없습니다.
-
-|  | HF transformers 엔진 | llama.cpp 엔진 |
+|  | HF transformers (PyTorch MPS) | llama.cpp (Metal) |
 |---|---|---|
-| **FP16/F16 정밀도** | HF FP16 (baseline) | GGUF F16 |
-| **4-bit 양자화** | HF NF4 (bitsandbytes) | GGUF Q4_K_M |
+| **16-bit** | HF FP16 (baseline) | GGUF F16 |
+| **4-bit** | HF NF4 (bitsandbytes) | GGUF Q4_K_M (K-quant) |
 
-- 행 = 엔진 효과 (`GGUF-F16 / HF-FP16`), 열 = 양자화 효과 (`GGUF-Q4_K_M / GGUF-F16`)
-- 지표: Peak VRAM(HF만), decode tok/s + TTFT + 스텝별 p50/p90/max, WikiText-2 perplexity(네 설정)
-- 컨텍스트 128→4096 토큰 스윕
+Including GGUF F16 is what lets the two effects be separated: comparing "GGUF Q4_K_M vs HF FP16" alone changes the engine and the precision at the same time.
 
-## Quickstart
+## Key findings
 
-**로컬 (Apple Silicon, MPS/Metal)** — 이 README의 실측치는 이 경로(Apple M3):
+### 1. The same 4 bits move in opposite directions
+
+![Same 4 bits, opposite directions](figures/fig1_same_4bit_opposite.png)
+
+Relative to its own engine's 16-bit weights, llama.cpp's **K-quant runs 2.58× faster** (2.35–2.84× across contexts), while bitsandbytes **NF4 runs 2.48× slower** (0.36–0.46×). K-quant also loses less quality: WikiText-2 perplexity 9.7446 vs 9.8060 (+2.13% vs +2.77% over the 16-bit baseline). Within this grid there is no inference setting in which NF4 is the better choice. This is the most robust result in the repository: it holds at every context length, at both capacities, and under every estimator I tried.
+
+**Weight size does not set the ranking — kernel support does.** HF NF4 (2.9GB of weights) is about **3.3× slower** than GGUF F16 (8GB of weights) at both capacities (2.7–3.4× across contexts). A likely explanation is that K-quant uses fused dequantize-and-matmul inference kernels, while NF4 was designed to save memory during QLoRA *training* and has no comparable Metal path. This is an inference from architecture, not from kernel profiling.
+
+### 2. "3.3× faster" is mostly quantization, not the engine
+
+| 24GB, steady-state speed ratio | 128 | 512 | 1024 | 2048 | 4096 | **Geo. mean** |
+|---|---|---|---|---|---|---|
+| Engine `GGUF-F16 / HF-FP16` | 1.16 | 1.22 | 1.30 | 1.49 | 1.19 | **1.27×** |
+| K-quant `Q4_K_M / GGUF-F16` | 2.84 | 2.70 | 2.60 | 2.46 | 2.35 | **2.58×** |
+| NF4 `HF-NF4 / HF-FP16` | 0.36 | 0.38 | 0.39 | 0.46 | 0.44 | **0.40×** |
+| Total `Q4_K_M / HF-FP16` | 3.30 | 3.29 | 3.40 | 3.67 | 2.79 | **3.28×** |
+
+The 3.28× total factors into an engine effect of 1.27× and a quantization effect of 2.58×. The engine still matters for another reason: it is the only place in this grid where 4-bit actually pays off (finding 1).
+
+### 3. A context-length "cliff", reproduced in four versions, was the metric
+
+![The 2048-token cliff was the metric](figures/fig2_cliff_was_metric.png)
+
+From v3 to v6, HF FP16 throughput collapsed between 1024 and 2048 tokens and partly recovered at 4096, and the pattern reproduced every time. Logging every decode step showed the reason: `tokens_per_sec = tokens / total time` is a **mean**, and a handful of multi-second stalls out of 150 steps dominate it. Going from 1024 to 2048 tokens, the mean-based cost rises **3.38×**; the per-step median rises **1.28×**. Pre-allocating the KV cache (`StaticCache`) removes the stalls. HF's default `DynamicCache` reallocates the cache at every step, and each HF FP16 generation pushes the driver's memory up to the machine's full 24GB; that the stalls are the OS reclaiming memory at this limit is consistent with the probes but not proven.
+
+This is not a new insight. Percentile reporting is standard practice for serving benchmarks (MLPerf Inference SingleStream uses p90), Agrawal et al. (arXiv:2507.09019) and *Etalon* (arXiv:2407.07000) name throughput metrics that hide generation stalls as a known pitfall, and Mytkowicz et al. (ASPLOS '09) show how measurement bias produces reproducible wrong conclusions. What this repository documents is that the practice has not yet reached on-device tools: MLPerf Client reports average tokens/s, and `llama-bench` reports mean ± std across repeats.
+
+### 4. Under memory pressure the gap becomes minutes
+
+On a 16GB machine, llama.cpp's steady-state speed does not react at all (stall tax 1.0× in all 20 cells); it reserves the KV cache once at load time and memory-maps the weights. HF FP16 generating 150 tokens from a 2048-token prompt takes **about 7 minutes**, about 5 minutes 44 seconds of which is stall time; llama.cpp Q4_K_M takes **14 seconds**. Memory pressure does not create the NF4–F16 kernel gap above; it amplifies it through stalls. (The audit flags two 16GB cells, FP16@2048 and NF4@4096, as too variable across repeats for any single summary to carry a conclusion; treat those numbers as illustrative.)
+
+## How the numbers are computed
+
+- **Steady state = per-step decode latency p50**, taken as the median over 5 repeats. `tokens_per_sec` is recorded but not used for conclusions, because it mixes kernel cost with stalls.
+- **Stall tax** = (1000 / step p50) ÷ mean tokens/s. A value of 1.0× means the mean is not distorted.
+- **Ratios are summarized by the geometric mean over all five context lengths, with the range.** Quoting a single context would itself be an estimator choice.
+- Run order is shuffled globally. Each row logs timestamps, swap usage and pinned memory, so contamination (sleep, swap saturation) can be checked after the fact. `tools/audit.py` is the gate before analysis.
+- Perplexity: all four configs scored by the same function on the same token sequence (full WikiText-2 test set, 299,078 tokens). The two independent F16 paths agree to 0.004% (9.5413 vs 9.5417).
+
+Headline numbers at ctx=128, 24GB, median of 5 runs (stall tax is 1.0× for all four, so the mean and the steady state agree here):
+
+| Config | Peak memory (GB) | Decode tok/s | TTFT (s) | Perplexity |
+|---|---|---|---|---|
+| HF FP16 (baseline) | 7.54 | 9.74 | 0.48 | 9.5413 |
+| HF NF4 (bitsandbytes) | 2.88 | 3.48 | 0.67 | 9.8060 |
+| GGUF F16 | –\* | 11.31 | 0.43 | 9.5417 |
+| GGUF Q4_K_M | –\* | 31.92 | 0.46 | 9.7446 |
+
+\* llama.cpp exposes no torch-style memory API; not measured.
+
+## Measurement record
+
+The current results are the eighth version. Across v1–v8 I found and fixed six measurement defects, each of which had changed a conclusion:
+
+1. **Double prefill** — `generate()` was called twice, so prefill leaked into decode throughput.
+2. **Asynchronous timing** — on MPS, `time.time()` marked when the CPU issued work, not when the GPU finished it, so prefill leaked in again.
+3. **Sleep contamination** — one 8-hour run spent 6 hours asleep; now every run uses `caffeinate -i` and logs timestamps.
+4. **Repeat-block ordering** — running repeats in blocks biased every median by 21–25%; global shuffling reduced this to ±4%.
+5. **The metric** — the mean hid stalls (finding 3).
+6. **The estimator** — taking the minimum over repeats to "remove contamination" biased the very comparison it was used for; four claims were retracted.
+
+The full record, with the probes that ruled out each alternative explanation, is in [docs/measurement-history.ko.md](docs/measurement-history.ko.md) (Korean). Every table, including the 16GB and memory-pressure experiments, is in [docs/full-report.ko.md](docs/full-report.ko.md) (Korean). The estimator bias is written up in [docs/estimator-bias-note.ko.md](docs/estimator-bias-note.ko.md) (Korean). Raw data from superseded versions is kept in `results/archive/` as an audit trail.
+
+## Reproduce
+
+Apple Silicon (MPS / Metal), which is the path all numbers above were measured on:
+
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 CMAKE_ARGS="-DGGML_METAL=on" pip install --no-cache-dir --force-reinstall llama-cpp-python
 
-# caffeinate -i 필수: 잠자기는 벽시계 타이밍을 조용히 망칩니다(v5가 8시간 중 6시간 잠들어 폐기됨)
-caffeinate -i python benchmark_quantization.py --stage context_sweep --repeats 5                  # 24GB 대조군
-caffeinate -i python benchmark_quantization.py --stage context_sweep --repeats 5 --ballast-gb 8   # 16GB 기계
-python benchmark_quantization.py --stage perplexity                                               # 네 설정 전부
+# caffeinate -i is required: sleep silently corrupts wall-clock timing
+caffeinate -i python benchmark_quantization.py --stage context_sweep --repeats 5                  # 24GB
+caffeinate -i python benchmark_quantization.py --stage context_sweep --repeats 5 --ballast-gb 8   # 16GB
+python benchmark_quantization.py --stage perplexity
 
-python tools/audit.py --repeats 5   # 신뢰성 게이트: 잠자기·불완전 셀·타이밍 불일치 검사
-python tools/analyze.py             # README/report의 모든 수치를 원자료에서 재생성
-python tools/cliff_probe.py --probe {prompt|sdpa|steps|cache|alloc|residue}   # 스톨 진단
-python tools/output_agreement.py    # 네 설정의 greedy 출력이 어디서 갈리는지
+python tools/audit.py --repeats 5   # integrity gate
+python tools/analyze.py             # regenerates every table from results/results.jsonl
+python tools/figures.py             # regenerates the two figures
 ```
 
-`--ballast-gb N`은 상주·비압축 메모리 N GB를 실행 내내 붙잡아 **호스트보다 작은 기계 등급을 재현**합니다. 이 24GB M3 Air에서 `8`은 16GB 맥, `16`은 8GB 맥에 해당합니다. M3 Air는 8/16/24GB 구성의 **대역폭(100GB/s)과 코어 수가 동일**하므로 용량만 빼는 이 시뮬레이션은 거친 근사가 아닙니다 — 다만 완전히 같지는 않습니다([Limitations](#limitations)).
+**On a larger machine the stall results will not appear, and that is expected.** Stalls happen because HF pushes memory to the machine's physical limit. With 64GB or more, the stall tax is 1.0× everywhere; findings 1 and 2 (kernel and precision) reproduce, while findings 3 and 4 (stalls) disappear. To reproduce the pressure, pin memory with `--ballast-gb` so the effective capacity is 24GB or 16GB (on a 64GB machine, `40` and `48`).
 
-**로컬 (CUDA GPU)**: `requirements.txt` 설치 후 `pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124`. (⚠️ CUDA 교차검증은 아직 v1 버그 방식 데이터뿐입니다 — [Limitations](#limitations).)
-
-### ⚠️ 재현하려는 분께: 큰 기계에서는 이 결과가 나오지 않습니다
-
-이 저장소의 핵심 발견(HF 경로의 스톨, FP16 @2048 "절벽", mmap 그룹 vs 상주 그룹의 범주적 격차)은 **기계가 메모리 압박을 받는 상태에서만 나타납니다.** 원인이 "HF가 생성마다 driver 메모리를 기계의 물리 한계까지 민다"이므로, **여유가 충분하면 아무 일도 일어나지 않습니다.**
-
-- **64GB 이상 맥**: 스톨 세금이 40셀 전부 1.0x로 나오고, HF와 GGUF 격차가 크게 줄며, 절벽은 아예 관측되지 않습니다. **이건 반증이 아니라 예측된 결과입니다.**
-- **재현하려면 용량을 깎으세요**: `--ballast-gb N`으로 실효 메모리를 **24GB 이하**로 맞춘 뒤 비교하십시오. 64GB 기계라면 `--ballast-gb 40`(=24GB)과 `--ballast-gb 48`(=16GB)이 이 README의 두 열에 대응합니다.
-- **확인 방법**: `tools/analyze.py`의 "정상 상태 vs 스톨 포함" 표에서 스톨 세금이 전부 1.0x면 압박이 걸리지 않은 것입니다. 그 상태에서는 이 저장소의 **① ② ③(커널·정밀도 이야기)은 그대로 재현되고, ④ ⑤(스톨 이야기)만 사라집니다.**
-
-바꿔 말하면 이 벤치마크는 두 층입니다 — 압박이 없으면 커널 효율 비교이고, 압박이 있으면 할당 전략 비교입니다. 어느 쪽을 재고 있는지는 스톨 세금 열이 알려줍니다.
-
-결과는 `results/results.jsonl`에 append됩니다. 각 줄에 `device`/`prompt_tokens`/`n_new`/`repeat`/`max_new_tokens`와 **`started_at`/`ended_at`/`swap_used_gb`/`ballast_gb`**가 기록되어, 실행이 잠자기·스왑 포화로 오염됐는지 사후에 증명할 수 있습니다(v5에는 타임스탬프가 없어 그게 불가능했습니다). 여러 용량의 실행이 한 파일에 섞여도 `ballast_gb`로 분리됩니다.
-
-v7부터 **`step_ms_p50`/`step_ms_p90`/`step_ms_max`**가, v8부터 **`step_ms`(스텝 배열 전체)** 와 `schema`가 추가됩니다. 배열을 통째로 남기는 이유는 요약값 세 개로는 **"셀의 퍼짐이 표집 잡음인지 구조인지"를 사후에 물을 수 없기** 때문입니다 — v7이 즉석 추정량(`min-p50`)에 의존하다 [철회](notes/estimator-bias-note.md)한 근본 원인이 여기입니다. **v7 이전 행에는 `step_ms`가 없습니다**(재측정하지 않았습니다). `tokens_per_sec`는 총시간 기반 **평균**이라 드문 스톨이 값을 지배하는 반면 `step_ms_p50`은 정상 상태 커널 비용을 재므로, 둘의 격차가 곧 **스톨 세금**입니다. 이 분리가 없으면 "커널이 느리다"와 "몇 번 멈췄다"를 구분할 수 없습니다 — v3~v6이 그 구분 없이 [절벽을 네 번 재현](#왜-이렇게-쟀는가--지표-선택이-결론을-만든-기록)했습니다. 메모리 압박 도구는 `tools/ballast.py`, `tools/pressure_probe.py`, 스톨 진단은 `tools/cliff_probe.py`.
-
-## Results
-
-측정: Apple M3 MacBook Air (24GB unified memory, 100GB/s) · HF는 PyTorch MPS, GGUF는 llama.cpp Metal · 아래는 컨텍스트 128 토큰, **5회 반복의 중앙값**(v7 24GB 대조군).
-
-| Config | Peak VRAM (GB) | decode tok/s | TTFT (s) | Perplexity |
-|---|---|---|---|---|
-| HF FP16 (baseline) | 7.54 | 9.74 | 0.48 | 9.5413 |
-| HF NF4 (bitsandbytes) | 2.88 | 3.48 | 0.67 | 9.8060 |
-| GGUF F16 (llama.cpp) | –\* | 11.31 | 0.43 | **9.5417** |
-| GGUF Q4_K_M (llama.cpp) | –\* | 31.92 | 0.46 | **9.7446** |
-
-ctx=128은 네 설정 모두 스톨 세금 1.0x라 평균과 정상 상태가 일치하는 구간입니다(개별 스텝의 튐은 여기서도 있습니다 — [단서](#context-length-scaling)). 장문 구간은 그렇지 않습니다 — [Context-length scaling](#context-length-scaling) 참조.
-
-\* llama.cpp는 torch식 VRAM API가 없어 미측정.
-
-**v7에서 네 설정 모두 perplexity가 생겼습니다.** v1–v6은 HF 팔만 재고 GGUF는 "llama.cpp 자체 구현이라 비교 불가"로 비워뒀는데, 그건 llama.cpp의 perplexity *도구*를 쓸 때 얘기였지 본질적 한계가 아니었습니다. `llm._scores`로 로짓을 직접 받아 **네 설정이 같은 토큰 시퀀스(HF 토크나이저)를 같은 윈도우 일정으로 같은 채점 함수에 태우면** 그대로 비교됩니다(WikiText-2 test 전체, 299,078토큰 / 584윈도우).
-
-두 가지가 이 수치를 검증합니다. 새 채점기가 **v1의 HF 내부 loss 방식 수치를 5자리까지 재현**하고(FP16 9.54129 → 9.5413, NF4 9.80603 → 9.8060), 서로 독립인 두 F16 경로가 **9.5413 vs 9.5417로 0.004% 차이**로 만납니다.
-
-### 출력 일치 — perplexity가 말해주지 않는 것
-
-perplexity는 집계 지표라 두 모델이 같은 값을 내면서 다른 답을 할 수 있습니다. 네 설정에 같은 프롬프트 4개를 greedy로 60토큰씩 물려 **토큰 단위로 어디서 갈라지는지** 봤습니다:
-
-| FP16과 비교 | P0 | P1 | P2 | P3 | |
-|---|---|---|---|---|---|
-| **GGUF F16** | 동일 | 동일 | 동일 | 동일 | **4/4 완전일치** |
-| GGUF Q4_K_M | 동일 | 15 | 0 | 12 | 1/4 |
-| HF NF4 | 3 | 53 | 11 | 5 | 0/4 |
-
-(숫자 = 갈라진 첫 토큰 위치)
-
-**두 F16 경로의 출력 텍스트가 네 프롬프트 모두에서 일치합니다.** 완전히 다른 두 구현이 같은 가중치 정밀도에서 같은 답을 낸다는 뜻이고, perplexity 0.004% 차이와 독립적으로 **엔진 축이 성능 축이지 수치 축이 아님**을 지지합니다.
-
-> **초판 정정 — 이 테스트는 "토큰 단위 동일"을 보이지 못합니다.** `tools/output_agreement.py`는 HF에서는 생성 토큰 ID를 직접 받지만 GGUF에서는 텍스트를 디토크나이즈했다가 **다시 토크나이즈**해 비교하고(BPE 왕복은 고정점이 아님), 길이가 다르면 `zip`이 짧은 쪽에서 멈춰 **한쪽이 다른 쪽의 접두사이기만 해도 "동일"로 판정**합니다. 초판의 "240토큰 전부에서 토큰 단위로", "비트 수준으로 같은 결정"은 이 스크립트가 지지할 수 있는 것보다 강한 주장이었습니다([검토](notes/review-v7-2026-08-11.md) B6).
-
-두 4비트 방식은 둘 다 일찍 갈라지고, **서로 간에는 우열이 뚜렷하지 않습니다**(Q4_K_M이 P0·P3에서, NF4가 P1·P2에서 FP16에 더 가까움). 갈라짐 위치는 가혹한 지표입니다 — greedy 디코딩은 토큰 하나가 달라지면 이후가 통째로 갈리므로, "3번째에서 갈라짐"이 "답이 나쁘다"를 뜻하지 않습니다. 품질 순위는 perplexity(Q4_K_M +2.13% vs NF4 +2.77%)로 매기는 게 맞고, 이 표는 **F16 쌍의 동일성**을 확인하는 용도입니다.
-
-### 엔진 효과 vs 양자화 효과
-
-**정상 상태 속도비**(= `p50(분모) / p50(분자)`, p50은 반복 5회의 중앙값), 컨텍스트별 값과 기하평균 — `python tools/analyze.py`가 이 표를 출력합니다:
-
-| 24GB | 128 | 512 | 1024 | 2048 | 4096 | **기하평균** |
-|---|---|---|---|---|---|---|
-| 엔진 `GGUF-F16 / HF-FP16` | 1.16 | 1.22 | 1.30 | 1.49 | 1.19 | **1.27배** |
-| K-quant `Q4_K_M / GGUF-F16` | 2.84 | 2.70 | 2.60 | 2.46 | 2.35 | **2.58배** |
-| NF4 `HF-NF4 / HF-FP16` | 0.36 | 0.38 | 0.39 | 0.46 | 0.44 | **0.40배 (2.48배 느림)** |
-| 합계 `Q4_K_M / HF-FP16` | 3.30 | 3.29 | 3.40 | 3.67 | 2.79 | **3.28배** |
-
-| 16GB | 128 | 512 | 1024 | 2048 | 4096 | **기하평균** |
-|---|---|---|---|---|---|---|
-| 엔진 | 1.17 | 1.48 | 1.76 | 3.49 | 1.51 | **1.74배** |
-| K-quant | 2.87 | 2.52 | 2.63 | 2.44 | 2.21 | **2.53배** |
-| NF4 | 0.36 | 0.44 | 0.54 | 1.09 | 0.44 | **0.53배 (1.90배 느림)** |
-| 합계 | 3.34 | 3.73 | 4.63 | 8.53 | 3.33 | **4.40배** |
-
-> **엔진 효과는 컨텍스트에 따라 1.16~1.49배(24GB)로 변합니다. 단일 컨텍스트 값을 대표값으로 쓰면 그 자체가 추정량 선택입니다.**
-
-**v7 초판은 이 표를 두 번 틀렸습니다.** ①`tokens_per_sec` 중앙값으로 계산했는데, 같은 문서가 그 지표를 "평균이라 스톨을 보고한다"며 폐기했습니다. ②다섯 컨텍스트 중 **최솟값인 ctx=128**만 실었습니다(엔진 1.16배). 철회한 `min-p50`과 **같은 종류의 실수**입니다 — 추정량 편향을 지적하는 문서의 대표 숫자가 추정량 선택의 산물이었습니다.
-
-**과거 실행과의 비교** — 아래는 전부 **폐기된 평균 기반 지표(`tokens_per_sec` @ctx=128)**로 계산된 값입니다. 위 표와 직접 비교할 수 없으며, 이력으로만 남깁니다:
-
-| 실행 | 엔진 | K-quant | NF4 | 합계 |
-|---|---|---|---|---|
-| v3 (24GB, 스왑 포화) | 1.12배 | 2.89배 | 0.375배 | 3.23배 |
-| v5 (24GB, 폐기된 실행) | 1.06배 | 3.05배 | 0.340배 | 3.25배 |
-| v6 (24GB, n=3) | 1.16배 | 2.90배 | 0.370배 | 3.36배 |
-| v7 (24GB, n=5) | 1.16배 | 2.82배 | 0.358배 | 3.28배 |
-
-"GGUF가 FP16보다 3.28배 빠르다"는 유지되지만, 요인을 분리하면 대부분(2.58배)이 K-quant 양자화이고 엔진 자체 기여는 1.27배입니다. 같은 "4-bit"인데 llama.cpp의 K-quant는 2.58배 빨라지고 bitsandbytes NF4는 2.48배 느려지는 정반대 결과는, K-quant가 추론 전용으로 디퀀타이즈+행렬곱을 융합한 커널인 반면 NF4는 QLoRA 학습의 메모리 절감이 주목적이라 추론 시 디퀀타이즈 오버헤드가 대역폭 절감분을 상쇄하기 때문으로 보입니다(커널 단위 프로파일링으로 직접 검증한 건 아닌 아키텍처 지식 기반 추정).
-
-**품질 축이 붙으면서 NF4의 입지가 사라집니다.** v6까지의 요약은 "메모리는 줄지만 속도 대가를 치른다"였는데, 이제 두 4비트 방식을 같은 자로 잴 수 있습니다:
-
-| | 속도 (ctx=128) | Perplexity | F16 대비 품질 손실 |
-|---|---|---|---|
-| GGUF Q4_K_M | **31.92 tok/s** | **9.7446** | **+2.13%** |
-| HF NF4 | 3.48 tok/s | 9.8060 | +2.77% |
-
-**K-quant가 9.2배 빠르면서 품질 손실도 더 작습니다.** 두 축 모두에서 집니다. VRAM 절감은 NF4가 62%(7.54→2.88GB)로 명확하지만, GGUF Q4_K_M도 가중치가 ~2.5GB로 같은 급입니다(torch식 API가 없어 미측정일 뿐).
-
-즉 **추론에서 bitsandbytes NF4를 선택할 이유는 이 격자 안에 남아 있지 않습니다.** NF4의 설계 목적이 QLoRA *학습*의 메모리 절감이라는 점을 생각하면 놀랄 일은 아니지만, v6까지는 "속도를 잃고 메모리를 얻는 교환"으로 보였던 것이 v7에서 **교환이 아니라 열위**로 정정됩니다.
-
-### Context-length scaling
-
-프롬프트 128→4096 토큰의 decode tok/s, **24GB 대조군, 5회 반복 중앙값 [최소–최대]**:
-
-| ctx | HF FP16 | HF NF4 | GGUF F16 | GGUF Q4_K_M |
-|---|---|---|---|---|
-| 128 | 9.74 [9.49–9.78] | 3.48 [3.26–3.51] | 11.31 [7.62–11.40] | 31.92 [24.79–32.06] |
-| 512 | 7.68 [7.11–9.24] | 3.47 [3.32–3.47] | 11.13 [10.58–11.18] | 30.03 [21.27–30.27] |
-| 1024 | 7.30 [6.24–8.21] | 3.23 [3.14–3.38] | 10.83 [10.77–10.94] | 27.58 [21.47–28.46] |
-| 2048 | **2.16** [1.48–2.44] | 2.98 [2.54–3.23] | 9.71 [7.44–10.11] | 22.90 [14.92–25.54] |
-| 4096 | 5.55 [2.78–5.90] | 2.43 [2.27–2.57] | 7.92 [7.04–9.45] | 19.13 [12.71–20.92] |
-
-**이 표는 두 가지를 섞어서 보고합니다.** `tokens_per_sec`는 총시간 기반 평균이라, 커널이 느린 것과 몇 번 멈춰 선 것을 구분하지 못합니다. 갈라 보면:
-
-| Config | 128 | 512 | 1024 | 2048 | 4096 |
-|---|---|---|---|---|---|
-| **HF FP16** | 9.75/9.74 `1.0x` | 9.16/7.68 `1.2x` | 8.32/7.30 `1.1x` | **6.51/2.16 `3.0x`** | 6.90/5.55 `1.2x` |
-| **HF NF4** | 3.49/3.48 `1.0x` | 3.47/3.47 `1.0x` | 3.21/3.23 `1.0x` | 2.98/2.98 `1.0x` | 3.05/2.43 `1.3x` |
-| **GGUF F16** | 11.34/11.31 `1.0x` | 11.18/11.13 `1.0x` | 10.84/10.83 `1.0x` | 9.73/9.71 `1.0x` | 8.22/7.92 `1.0x` |
-| **GGUF Q4_K_M** | 32.18/31.92 `1.0x` | 30.13/30.03 `1.0x` | 28.25/27.58 `1.0x` | 23.90/22.90 `1.0x` | 19.28/19.13 `1.0x` |
-
-각 칸은 `정상상태(1000/스텝 p50) / 보고값(평균)` 과 **스톨 세금 배수**입니다. **GGUF는 20셀 전부 1.0x이고 HF만 1.0x를 벗어납니다.**
-
-두 가지 단서를 달아야 합니다. (a) 세금 1.0x는 "멈춤이 전혀 없었다"가 아니라 **"멈춤 총량이 평균을 못 움직였다"**입니다 — `--probe alloc`의 정의(한 스텝이 그 실행 p50의 3배 초과)를 적용하면 24GB GGUF 3개 셀에 해당 스텝이 있고, 최악은 `Q4_K_M ctx=512`의 652.9ms(p50 33.8ms의 **19.3배**)입니다. (b) 이 열은 **한 실행 안의** p50과 평균을 비교하므로 **반복 간 분산에 눈이 멉니다** — 24GB `Q4_K_M @2048`은 p50이 39.1~69.0ms(1.77배)로 흔들리는데 다섯 실행 모두 세금 1.0x입니다.
-
-TTFT(prefill)는 네 설정 모두 컨텍스트에 거의 선형이라 4096에서 15~18초로 수렴합니다(C-1 수정 검증 — 버그 있던 v2는 HF TTFT를 0.03초로 보고했는데 4104토큰 prefill로선 물리적으로 불가능한 값이었습니다).
-
-**"% 저하"도 함정이고, 평균 기반 절대 지연도 함정입니다.** 128→4096 토큰당 절대 증가를 세 방식으로 계산하면:
-
-| Config | 평균 기반 | p50 중앙값 | p50 최소 | p50 평균 |
-|---|---|---|---|---|
-| HF FP16 | +77.5 | **+42.4** | **+42.1** | **+45.6** |
-| HF NF4 | +124.3 | **+41.4** | **+41.9** | **+46.8** |
-| GGUF F16 | +37.9 | +33.5 | +17.6 | +26.2 |
-| GGUF Q4_K_M | +21.0 | +20.8 | +16.7 | +26.2 |
-
-**24GB HF 쌍은 어느 추정량으로 봐도 격차가 작습니다**(0.2~1.2ms). 이것이 roofline의 예측입니다: 토큰당 읽는 바이트 = 가중치 + KV 캐시이고, **KV 캐시 증가분은 가중치 정밀도와 무관**하므로 컨텍스트가 붙이는 절대 비용도 같아야 합니다.
-
-단, **"격차가 작다"와 "격차가 0임을 확인했다"는 다릅니다.** 부트스트랩 CI를 `analyze.py`에 구현하고 나서야 보인 것인데, HF 쌍의 CI는 p50 중앙값 기준 **[−36.0, +21.0] ms**로 넓습니다 — 0을 포함하므로 roofline 예측과 모순되지 않지만, 36ms짜리 격차도 배제하지 못합니다. n=5의 한계입니다. **예측에 부합한다**까지가 이 데이터로 할 수 있는 말입니다.
-
-**24GB GGUF 쌍은 그렇지 않습니다.** 추정량에 따라 격차가 0.9ms(최소) / 12.7ms(중앙값) / 0.0ms(평균)로 갈립니다 — 셋 다 같은 데이터에서 나옵니다. 부트스트랩 95% CI(20,000회)는 **[−3.5, +17.5] ms**로, **현재 표본으로는 판정 불가**입니다.
-
-원인은 GGUF F16 @4096 셀의 반복 간 분산입니다(p50 105.0~140.6ms). 이 셀에서 최솟값을 고르면 13.7% 축소되는데 ctx=128에서는 0.9%만 축소되어, **차분에 −15.9ms의 순축소가 남습니다.** HF 쌍은 양끝 축소가 대칭(0.7%/0.7%)이라 차분이 안 움직입니다. 결정적으로, **이 셀에서 `min`이 고른 실행은 다섯 중 스왑이 가장 높았던 실행(10.0GB vs 나머지 4.5~5.9GB)**이라 "빠른 실행 = 덜 오염된 실행"이라는 전제 자체가 성립하지 않습니다.
-
-16GB는 반대입니다 — **GGUF 쌍이 견고**하고(+16.5/+16.2 최소, +17.6/+17.0 중앙값, +16.6/+17.2 평균, CI [−0.7, +2.1]) HF 쌍이 흔들립니다(최소 +49.3/+49.6, 중앙값 +56.4/+71.9).
-
-정리하면 **네 쌍 중 둘(24GB HF, 16GB GGUF)에서 roofline 예측이 견고하게 확인되고, 나머지 둘은 표본이 부족합니다.** 엔진 간 차이(~42ms vs ~17ms)는 모든 추정량에서 유지됩니다.
-
-> **v7이 처음 쓴 서술을 철회합니다.** 초판은 `p50 최소` 열만 굵게 처리하고 "오염을 걷어낸 마지막 열에서 두 정밀도가 일치합니다"라고 적었습니다. `p50 중앙값` 열을 **같은 표에 인쇄해 놓고** 그 열이 반증하는 결론을 옆 열로 선언한 것이며, 외부 검토가 이를 "여섯 번째 결함 — 이번엔 코드도 지표도 아닌 **추정량**"으로 지적했습니다([notes/review-v7-2026-08-11.md](notes/review-v7-2026-08-11.md) A1). `min`은 편향된 추정량이고, 그 편향이 결론에 유리한 방향으로만 작동했습니다.
-
-같은 구간 Peak VRAM(HF만, 중앙값): FP16 7.54 → 8.22GB (+0.68), NF4 2.88 → 3.92GB (+1.04). NF4의 절대 증가가 더 큰 이유는 v1부터 미규명입니다([Limitations](#limitations)).
-
-### 왜 이렇게 쟀는가 — 지표 선택이 결론을 만든 기록
-
-**이 절은 새로운 발견이 아니라 방법 정당화입니다.** 처리량 평균이 지연 분포의 꼬리를 가린다는 것, 그래서 백분위를 보고해야 한다는 것은 이미 출판된 이야기입니다:
-
-- Agrawal et al., *On Evaluating Performance of LLM Inference Serving Systems* (arXiv:2507.09019) — 초록이 "**generation stalls**처럼 상당한 성능 변동을 가리는 지표 정규화"를 반복되는 함정으로 명시합니다.
-- Agrawal et al., *Etalon* (arXiv:2407.07000) — 처리량 중심 지표가 실사용 경험을 잘못 나타낸다는 문제 제기와 유동 지표 제안.
-- Mytkowicz, Diwan, Hauswirth, Sweeney, *Producing Wrong Data Without Doing Anything Obviously Wrong!* (ASPLOS '09) — 측정 편향이 재현 가능한 가짜 결론을 만드는 교과서적 사례. 그 처방(setup randomization)이 이 저장소가 v3에서 도입한 바로 그것입니다.
-- Dean & Barroso, *The Tail at Scale* (CACM 2013) · Heiser, *Systems Benchmarking Crimes*.
-
-**남아 있는 간극은 "몰랐다"가 아니라 "온디바이스 도구에 아직 안 왔다"입니다.** MLPerf Inference의 SingleStream 시나리오는 90th percentile이 공식 지표인데, 온디바이스 표준 벤치마크인 **MLPerf Client는 지금도 평균 TPS만 보고**하고 `llama-bench`도 반복 간 평균±표준편차까지입니다 — 스텝 단위 백분위가 없습니다. 서빙에서는 상식인 것이 온디바이스 도구에는 아직 도착하지 않았고, 이 저장소는 그 간극에 다섯 판본 동안 빠져 있었습니다.
-
-아래는 그 기록입니다.
-
-#### 다섯 판본에 걸쳐 네 번 재현된, 존재하지 않는 절벽
-
-v3부터 v7까지 `tokens_per_sec` 기준으로 FP16만 1024 → 2048에서 급락한 뒤 4096에서 부분 회복하는 비단조 곡선이 재현됐습니다. v6까지 이 저장소는 이것을 미해결 과제로 두고 "형상/커널 계열을 먼저 보라"고 적었습니다. **틀린 방향이었습니다.**
-
-`tools/cliff_probe.py`의 네 프로브가 순서대로 답을 좁혔습니다:
-
-| 프로브 | 가설 | 결과 |
-|---|---|---|
-| `--probe prompt` | `make_long_prompt`이 이 길이에서 이상한 입력을 만든다 | **반증.** 모든 ctx에서 filler가 정확히 N토큰, 템플릿 오버헤드 +8 고정, 재토크나이즈 고정점, 주기 30으로 완전 주기적 |
-| `--probe sdpa` | SDPA 백엔드가 시퀀스 길이에 따라 바뀐다 | **반증.** S=512~4104에서 337→1064µs로 매끄럽게 선형, 2048 근처를 1토큰 간격으로 훑어도 계단 없음. `SDPBackend.MATH` 강제해도 비율 1.00(MPS엔 경로가 하나뿐) |
-| `--probe steps` | 스텝별 비용이 이 길이에서 뛴다 | **반증.** 스텝 중앙값은 125 → 155 → 163ms로 매끄럽고 단조. 절벽은 전부 **드문 스톨**(단일 스텝 4.75초, 6.56초) |
-| `--probe cache` | 스톨은 KV 캐시 재할당 때문이다 | **확인.** `cache_implementation="static"`으로 선할당하면 max 3990→276ms(@2048), 스톨 세금 2.51x → **1.01x** |
-| `--probe alloc` | 느린 스텝은 할당자가 OS에서 메모리를 못 받는 스텝이다 | **반증.** 느린 스텝의 driver 메모리 증가 비율이 정상 스텝과 같음(2회 실행 22%/39%, 38%/38%). 스톨 중 driver는 오히려 −2MiB |
-
-**정체는 지표였습니다.** `tokens_per_sec = 토큰수 / 총시간`은 평균이라, 150스텝 중 열두어 번의 수 초짜리 멈춤이 값을 지배합니다.
-
-**멈추는 이유는 KV 캐시 재할당이 맞지만, 스텝 단위 메커니즘은 처음 생각과 다릅니다.** HF의 기본 `DynamicCache`는 매 디코드 스텝마다 `torch.cat`으로 캐시를 재할당합니다(36레이어 × K·V = 스텝당 72번). 자연스러운 설명은 "그 요청 중 일부가 OS에서 거절당해 몇 초 걸린다"이지만, `--probe alloc`이 이를 **반증**했습니다 — 느린 스텝에서 driver 메모리는 자라지 않습니다.
-
-실제로 측정된 것은 이렇습니다(`--probe alloc`, `--probe residue`):
-
-- **HF 생성 한 번은 driver 보유 메모리를 24.9GB까지 밀어 올립니다** — 이 기계의 물리 RAM과 같은 값입니다. 매 측정이 한계선을 칩니다.
-- 첫 측정이 만든 **16.35GB 풀은 `del model` + `gc.collect()` + `torch.mps.empty_cache()` 이후에도 반환되지 않습니다.** 모델을 내려도 그대로 잡혀 있습니다.
-- 2회차부터는 잔여가 더 늘지 않습니다(회차별 잔여 −0.19G, 0.00G, 0.00G). 누수가 아니라 **되돌아오지 않는 고원**입니다.
-- 스톨은 흩어져 있지 않고 **뭉쳐 있으며, 두 실행 모두 59~69 스텝 부근**에서 터졌습니다. 그 구간에서 driver는 늘지 않거나 줄어듭니다(−2MiB).
+## Repository layout
 
 ```
-회차   로드후    생성후    해제후    생성중증가   회수못한잔여
-  0    7.73G   24.90G   16.53G     +17.17G      16.53G
-  1   20.54G   24.89G   16.35G      +4.35G      −0.19G
-  2   21.35G   24.89G   16.35G      +3.54G       0.00G
-  3   21.35G   24.89G   16.35G      +3.54G       0.00G
+benchmark_quantization.py   # the sweep: context_sweep and perplexity stages
+tools/
+  audit.py                  # integrity gate: sleep gaps, incomplete cells, token counts, per-cell variance
+  analyze.py                # regenerates every table from results/results.jsonl
+  figures.py                # regenerates the README figures
+  cliff_probe.py            # stall diagnostics (prompt, SDPA backend, per-step, cache, allocator, residue)
+  output_agreement.py       # where the four configs' greedy outputs diverge
+  ballast.py, pressure_probe.py   # memory-capacity simulation and mmap on/off A/B
+results/
+  results.jsonl             # 200 audited rows (current data)
+  results_perplexity_v7.jsonl
+  results_memory_pressure.jsonl
+  probe_*.log               # saved probe outputs behind the causal claims
+  archive/                  # data from superseded versions, kept as an audit trail
+docs/                       # full report, measurement history, estimator note (Korean)
+figures/
 ```
-
-즉 **개별 할당 요청이 거절당하는 게 아니라, 매 생성이 기계를 물리 한계까지 채우고 그 상태에서 OS가 회수에 들어가는 에피소드**로 보입니다. 앞의 관측들은 측정값이고, "한계 도달 → OS 회수"는 그와 일관된 가설이지 증명된 것은 아닙니다. StaticCache가 스톨을 없앤 것도 이 그림과 맞습니다 — 선할당하면 생성 중 증가가 없어집니다.
-
-**스텝별로 보면 절벽이 없습니다.** 24GB FP16의 p50을 두 추정량으로:
-
-| ctx | 128 | 512 | 1024 | 2048 | 4096 |
-|---|---|---|---|---|---|
-| p50 **중앙값** | 102.5 | 109.2 | 120.2 | **153.7** | 144.9 |
-| p50 **최솟값** | 101.8 | 108.3 | 115.8 | 128.2 | 143.9 |
-
-**"1024→2048에서 4.3배 급락"의 실제 값은 중앙값 기준 1.28배, 최솟값 기준 1.11배입니다.** 어느 쪽으로 봐도 절벽은 아닙니다.
-
-다만 **중앙값 곡선은 단조가 아닙니다** — 2048(153.7)이 4096(144.9)보다 높고, 5회 중 3회의 2048 p50이 4096 중앙값보다 느립니다. 최솟값 곡선만 단조입니다. 즉 **2048에서는 정상 상태 지표 자체도 어느 정도 올라가며**, 지표 결함이 절벽의 대부분을 만들었지만 전부는 아닙니다.
-
-> **초판 정정.** v7 초판은 이 표에 최솟값만 싣고 "스텝별 중앙값으로 보면 … 완전 단조"라고 적었습니다. 라벨은 중앙값, 값은 최솟값이었고 실제 중앙값은 단조가 아닙니다([검토](notes/review-v7-2026-08-11.md) A2).
-
-절벽으로 보이던 것은 스톨 시간이었습니다(24GB, FP16, 5회 각각):
-
-```
-ctx=2048:  75.8 / 46.7 / 46.2 / 42.0 / 38.4 초   ← 5/5회
-ctx=4096:  31.8 / 26.8 /  5.4 /  3.8 /  2.7 초   ← 2/5회
-```
-
-#### 무엇이 잘못됐는지의 정확한 진술
-
-세 판본이 이 곡선을 실재하는 커널 현상으로 취급했고, 그 근거는 "무작위 순서로 여러 번 재서 중앙값을 썼는데 재현된다"였습니다. **실행 조건은 무작위화했지만 지표는 무작위화하지 않았습니다.** 무작위화한 반복은 *확률적 오차*를 배제하지만 *지표 정의에 내장된 편향*은 배제하지 못합니다 — 오염이 한 방향으로만 작동하고(스톨은 절대 빨라지지 않음) 5회 중 5회에 존재하면, 중앙값도 평균과 같이 오염됩니다.
-
-정확히 말하면 **스텝 단위 백분위는 스톨을 분리해 냅니다**(절벽의 대부분을 지웁니다: 3.38배 → 1.28배). 실패한 것은 **반복 간 요약**입니다.
-
-그리고 스톨은 "오염"이 아닙니다 — 16GB NF4@4096의 한 실행은 150토큰에 **127분**이 걸렸고, 사용자는 그 시간을 실제로 기다립니다. **그래서 처방은 스톨을 빼는 것이 아니라 커널 비용과 스톨을 분리해 둘 다 보고하는 것입니다.** 이 저장소가 v7에서 스톨을 "걷어내려다" 여섯 번째 결함(`min-p50`)을 만든 것도 그 구분을 흐렸기 때문입니다.
-
-**v6이 근거로 삼았던 두 논증은 성립하지 않습니다:**
-
-- "세 실행에서 소수점 둘째 자리까지 재현(1.91 / 2.13 / 1.90)" — 이 값들은 n=3 중앙값이고, 원시값은 v3 `1.57–1.99`, v5 `1.86–2.40`, v6 `1.81–2.74`로 흩어져 있습니다. 재현된 건 중앙값이지 분포가 아닙니다.
-- "16GB에서도 2048:4096 비율이 1.93→1.99로 보존되므로 메모리 압박과 직교" — 원본 세 실행의 같은 비율은 2.36 / 1.86 / 1.93으로 27% 흩어져 있습니다. 1.99는 그 잡음 안에 있어 근거가 되지 못합니다. **실제로는 직교하지 않습니다** — 압박을 걸면 스톨 세금이 3.0x → 8.1x로 커집니다.
-
-**아직 모르는 것 두 가지:**
-
-1. **왜 하필 2048이 4096보다 잘 걸리는가.** 24GB에서 5/5 vs 2/5, 16GB에서 8.1x vs 2.6x로 두 용량 모두에서 유지되므로 우연으로 보기 어렵습니다. ctx=2048에서 레이어당 KV 텐서가 정확히 4MiB(8×2048×128×2바이트)라 할당자 크기 클래스 경계와 관련될 수 있다는 가설이 있으나 미검증입니다. 다음 실험은 2048 주변을 촘촘히 훑는 ctx 스윕입니다.
-2. **정상 상태 지표 자체도 2048에서 올라갑니다 — 두 용량 모두에서.** 24GB p50 중앙값이 2048(153.7)에서 4096(144.9)보다 높고, 16GB 최솟값 곡선도 `102.2 → 110.0 → 117.3 → 167.0 → 151.5`로 같은 자리에서 튑니다. 압박이 크면 스톨이 스텝의 절반 이상에 퍼져 중앙값을 밀어 올립니다. 즉 이 현상은 **지표 결함이면서 동시에 실재하는 병리**이고, 24GB는 전자가 지배적일 뿐 후자가 없는 것이 아닙니다.
-
-**StaticCache는 진단 도구이지 처방이 아닙니다.** 스톨은 없애지만 스텝 p50이 146→243ms(@2048), 162→369ms(@4096)로 함께 오르고 VRAM도 8.22→9.99GB로 늘어납니다. 어텐션 구간 길이가 거의 같으므로(4179 vs 4254) SDPA 비용으로는 설명되지 않으며, 원인은 미규명입니다. 벤치마크 기본값은 `DynamicCache` 그대로 두었습니다.
-
-## 16GB: 실제 사람들이 쓰는 기계
-
-24GB에서는 FP16 8GB가 여유롭게 들어가 벤치마크가 사실상 커널 효율만 잽니다. 주류 구성인 16GB에서는 다릅니다. 같은 프로토콜로 `--ballast-gb 8`을 걸어 재측정했습니다(5회 중앙값 [최소–최대]):
-
-| ctx | HF FP16 | HF NF4 | GGUF F16 | GGUF Q4_K_M |
-|---|---|---|---|---|
-| 128 | 9.69 [8.99–9.70] | 3.48 [3.26–3.51] | 11.11 [10.41–11.41] | 32.17 [28.89–32.27] |
-| 512 | 5.63 [4.98–7.97] | 3.28 [2.95–3.46] | 11.08 [10.25–11.14] | 28.06 [22.74–30.47] |
-| 1024 | 5.38 [4.21–7.72] | 3.36 [2.62–3.39] | 10.87 [9.65–10.92] | 28.55 [26.57–28.59] |
-| 2048 | **0.37** [0.33–0.58] | 3.24 [2.65–3.26] | 10.34 [9.65–10.36] | 25.52 [21.98–25.68] |
-| 4096 | 2.41 [0.66–2.85] | 1.14 [0.02–1.38] | 9.24 [8.80–9.54] | 20.82 [17.37–21.12] |
-
-**같은 데이터를 정상 상태 / 평균 / 스톨 세금으로 갈라 보면 원인이 드러납니다:**
-
-| Config | 128 | 512 | 1024 | 2048 | 4096 |
-|---|---|---|---|---|---|
-| **HF FP16** | 9.77/9.69 `1.0x` | 7.56/5.63 `1.3x` | 6.22/5.38 `1.2x` | **3.00/0.37 `8.1x`** | 6.30/2.41 `2.6x` |
-| **HF NF4** | 3.50/3.48 `1.0x` | 3.30/3.28 `1.0x` | 3.38/3.36 `1.0x` | 3.26/3.24 `1.0x` | 2.80/1.14 `2.4x` |
-| **GGUF F16** | 11.39/11.11 `1.0x` | 11.19/11.08 `1.0x` | 10.97/10.87 `1.0x` | 10.48/10.34 `1.0x` | 9.49/9.24 `1.0x` |
-| **GGUF Q4_K_M** | 32.63/32.17 `1.0x` | 28.22/28.06 `1.0x` | 28.79/28.55 `1.0x` | 25.61/25.52 `1.0x` | 21.00/20.82 `1.0x` |
-
-**24GB 대비 저하율(평균 기준):**
-
-| Config | 128 | 512 | 1024 | 2048 | 4096 |
-|---|---|---|---|---|---|
-| HF FP16 | −0% | −27% | −26% | **−83%** | **−57%** |
-| HF NF4 | −0% | −5% | +4% | +9% | **−53%** |
-| GGUF F16 | −2% | −0% | +0% | +7% | +17% |
-| GGUF Q4_K_M | +1% | −7% | +4% | +11% | +9% |
-
-**mmap 그룹이냐 상주 그룹이냐로 범주적으로 갈립니다.** 컨텍스트 전 구간 최악 저하가 mmap 그룹 **−6.6%**, 상주 그룹 **−82.8%** — 연속 스펙트럼이 아니라 두 덩어리이고 사이에 아무것도 없습니다.
-
-**"3배 가벼운 모델이 진다"는 16GB의 발견이 아닙니다.** GGUF F16(가중치 8GB)이 HF NF4(가중치 2.9GB)를 이기는 것은 맞지만, 정상 상태 기준으로 그 배수는 **용량과 무관하게 ~3.3배로 같습니다**:
-
-```
-NF4가 GGUF-F16보다 느린 배수 (정상 상태 p50)
-        ctx=128   512  1024  2048  4096
-24GB     3.25   3.22  3.37  3.27  2.70
-16GB     3.25   3.39  3.25  3.21  3.39
-```
-
-**24GB에서도 똑같이 집니다.** 따라서 원인은 "메모리 획득 전략"이 아니라 **bitsandbytes NF4에 Metal 커널이 없다**는 것이고, 이건 [①](#tldr)과 같은 문장입니다. 가중치 크기가 아니라 **양자화 포맷의 커널 지원**이 순위를 정합니다.
-
-용량이 기여하는 지점은 하나입니다 — 같은 비를 **평균 처리량**으로 보면 16GB @4096에서만 3.4배가 **8.1배**로 벌어집니다. 즉 메모리 압박은 격차를 *만들지* 않고 **스톨 채널을 통해 증폭**할 뿐입니다.
-
-**그리고 v7은 그 이유가 커널이 아님을 보여줍니다.** 8GB를 뺏겼을 때 두 엔진에 벌어지는 일이 질적으로 다릅니다:
-
-| | 정상 상태 24GB → 16GB | 스톨 세금 |
-|---|---|---|
-| GGUF F16 @2048 | 9.73 → **10.48** (변화 없음) | 1.0x |
-| GGUF F16 @4096 | 8.22 → **9.49** (변화 없음) | 1.0x |
-| HF FP16 @2048 | 6.51 → **3.00** (반토막) | **8.1x** |
-| HF FP16 @4096 | 6.90 → 6.30 | 2.6x |
-
-**llama.cpp의 커널 속도는 압박에 아예 반응하지 않습니다.** 20개 셀 전부 스톨 세금 1.0x입니다. HF는 두 번 맞습니다 — 정상 상태 자체가 무너지고, 그 위에 멈춤이 얹힙니다.
-
-이유는 **언제 메모리를 잡느냐**입니다. llama.cpp는 로드 시점에 KV 캐시를 `n_ctx`만큼 통으로 예약하고 가중치를 mmap합니다. 생성 도중에는 메모리 사용량이 평평하므로 압박을 **더 만들지 않습니다**. HF는 스텝마다 72번씩 재할당하고, 그 과정에서 torch의 MPS 할당자가 driver 보유 메모리를 생성마다 24.9GB(= 물리 RAM 전량)까지 밀어 올립니다([해소 절](#왜-이렇게-쟀는가--지표-선택이-결론을-만든-기록)) — **압박을 견디는 문제가 아니라 스스로 만드는 문제입니다.**
-
-이건 v4의 mmap A/B가 확인한 것과 **별개의 두 번째 메커니즘**입니다. v4는 *가중치* mmap이 압박 하에서 결정적임을 보였고(`use_mmap` off 시 저하 −9.2% → −39.8%), v7의 `--probe cache`는 *KV 캐시* 선할당이 스톨을 없앤다는 것을 보였습니다. 두 기여분을 분해하려면 스텝 계측이 붙은 mmap A/B를 다시 돌려야 합니다([Next steps](#next-steps)).
-
-상주 그룹 *내부*에서 가중치 크기가 작동하는 지점은 **스톨이 언제 시작되느냐**입니다 — FP16(8GB)은 2048부터, NF4(2.9GB)는 4096에서 무너집니다. 커널 속도의 순위는 크기가 정하지 않고(위 참조), 크기는 **압박 하에서 스톨 시점**만 정합니다.
-
-**roofline은 스톨을 걷어내면 16GB에서도 유효합니다.** v6은 "스왑이 시작되면 다른 물리 법칙"이라고 적었지만, 평균 기반이라 그렇게 보였을 뿐입니다. 최소오염 p50 기준 128→4096 절대 증가는 16GB에서도 **HF +49.3/+49.6ms, GGUF +16.5/+16.2ms**로 엔진별 쌍이 유지됩니다. 무너지는 건 roofline이 아니라 지표였습니다.
-
-**실사용 관점 — 16GB에서 150토큰 생성 전체 소요(프리필 포함):**
-
-| | 128 | 512 | 1024 | 2048 | 4096 |
-|---|---|---|---|---|---|
-| **GGUF Q4_K_M** | 5s | 7s | 9s | 14s | 24s |
-| **GGUF F16** | 14s | 15s | 17s | 21s | 32s |
-| HF NF4 | 44s | 48s | 48s | 54s | 146s |
-| HF FP16 | 16s | 28s | 31s | **414s** | 77s |
-
-16GB 맥에서 transformers FP16으로 2K 프롬프트를 처리하면 **7분**, 같은 작업이 llama.cpp Q4_K_M으로 **14초**입니다. 그 7분 중 약 5분 44초는 계산이 아니라 멈춰 있는 시간입니다.
-
-## Memory pressure (ballast 실험)
-
-v1은 "다른 앱이 켜져 있어 스왑으로 붕괴"라는 재현 불가 일화로 "GGUF는 mmap 덕분에 강건"을 주장했습니다. v2에서 이를 통제 실험으로 만들었지만(ballast 프로세스로 메모리 강제 점유 + mmap on/off 대조), 두 가지 결함이 드러났습니다: (a) `ballast.py`가 초기 fill 후 64MB 창만 재기록하는 순회 버그로 나머지 ~99%가 스왑아웃돼 실제 압박을 유지하지 못했고, (b) 0GB 기준선이 이미 스왑 30GB로 오염돼 "유휴 vs 압박"이 아니라 "압박 vs 더-압박"이었습니다.
-
-v3에서 도구는 완전히 고쳤습니다:
-- `ballast.py` 순회 버그 수정(전 페이지를 매 주기 터치해 상주 유지 — 3GB 요청 시 RSS가 축소 없이 유지됨을 확인)
-- `pressure_probe.py`에 **GGUF F16 추가**(8GB 가중치로 압박에 가장 취약한 후보), **config 순서 무작위화**(순서 교락 제거), **매 측정 시점의 실제 스왑 사용량 기록**(압박이 실제로 걸렸는지 조작검증), 다단계 ballast(0/8/16GB 양성 대조), 그리고 v3의 수정된 측정 경로(`measure_one`) 사용
-
-**v4에서 재부팅 직후(스왑 0GB) `tools/pressure_probe.py --ballast-gb 0,8,16`을 실행했습니다**(`results/results_memory_pressure.jsonl`). 0→16GB ballast에서 decode tok/s 저하:
-
-| Config | ctx=128 | ctx=4096 |
-|---|---|---|
-| GGUF Q4_K_M **(mmap)** | 30.96 → 31.02 (+0.2%) | 20.89 → 18.96 (**−9.2%**) |
-| GGUF Q4_K_M **(nommap)** | 30.32 → 30.28 (−0.1%) | 20.74 → 12.49 (**−39.8%**) |
-| GGUF F16 (mmap) | 11.09 → 10.63 (−4.1%) | 9.39 → 8.14 (−13.4%) |
-| HF FP16 | 9.16 → 8.73 (−4.6%) | 2.44 → 0.97 (−60.4%) |
-| HF NF4 | 3.49 → 3.41 (−2.4%) | 2.38 → 0.47 (−80.5%) |
-
-- **단문(128)은 아무도 안 흔들립니다**(≤5%) — working set이 작아 압박은 장문에서만 뭅니다.
-- **장문(4096)에서 mmap 가설이 직접 확인됐습니다.** 같은 Q4_K_M 가중치·엔진에서 `use_mmap`만 끄면 저하가 **−9.2% → −39.8%로 4.3배** 커집니다. 0GB에선 둘 다 ~20.8 tok/s로 같으므로 이 격차는 압박이 있을 때만 열립니다. **v2의 버그 있던 ballast가 "반증"했던 v1 mmap 가설이, 고친 도구·깨끗한 baseline에서 오히려 재확인된 셈입니다.**
-- **이 `use_mmap` A/B는 메인 스윕이 대체하지 못하는 유일한 증거입니다.** 스윕은 mmap을 끄지 못하므로, "GGUF가 강건한 건 llama.cpp라서가 아니라 할당 전략이라서"를 못박는 대조군은 여전히 여기에만 있습니다. 다만 이 표에는 **스텝 계측이 없어** 저하가 커널 둔화인지 스톨인지 사후 분해가 불가능합니다 — v7이 남긴 가장 큰 미완입니다([Next steps](#next-steps) 10번).
-
-**⚠️ 이 표의 HF 수치는 반복 1회입니다.** 표본을 늘려가며 재보니 HF 두 경로의 순위가 **한 번 뒤집혔다가 결국 붙었습니다**:
-
-| ctx=4096, 24GB→16GB | v4 (n=1) | v6 (n=3) | v7 (n=5) |
-|---|---|---|---|
-| HF FP16 | −60.4% | −80% | **−57%** |
-| HF NF4 | −80.5% | −41% | **−53%** |
-
-v4만 보면 "NF4가 FP16보다 더 무너진다", v6만 보면 "FP16이 두 배 더 무너진다"로 읽히지만, **n=5에서는 −57% vs −53%로 사실상 구분되지 않습니다.** 이 셀은 스톨 세금이 2.6x·2.4x로 둘 다 높아, 재는 것이 커널이 아니라 그날의 스톨 운입니다. **가까운 두 값의 순위를 이런 셀에서 매기면 안 된다는 사례로 남깁니다** — 표본을 늘릴 때마다 결론이 바뀌었고, 세 번째에야 "차이 없음"이 드러났습니다.
-
-방향성 있는 결론은 [16GB 절](#16gb-실제-사람들이-쓰는-기계)에 있습니다 — 커널 속도의 순위는 양자화 포맷의 커널 지원이 정하고(용량 무관 ~3.3배), 가중치 크기는 압박 하에서 **스톨이 언제 시작되느냐**만 정합니다(FP16 2048, NF4 4096).
-
-("0GB" 기준선도 8GB F16 가중치를 로딩하며 세션 스왑이 6~7GB로 오르지만, 매 측정의 스왑을 기록해 드러냈고, mmap A/B는 두 config의 스왑이 비슷해 공정합니다.)
-
-## Related benchmarks (sanity check)
-
-- Unsloth GGUF Benchmarks — Q4_K_M vs Q5_K_M perplexity
-- 커뮤니티: Q4_K_M ≈ FP16 대비 용량 75% 감소, 품질 저하 1~3%(MMLU)
-
-우리 perplexity 저하(NF4 +2.8%)는 이 범위와 방향이 일치하나, 지표(WikiText-2 언어모델링 손실 vs MMLU 정확도)·양자화 방식(NF4 vs GGUF)이 달라 엄밀한 검증은 아닙니다.
 
 ## Limitations
 
-- **스윕은 압박 없는 환경에서 돌지 않지만, "시간이 갈수록 포화된다"는 서술은 틀렸습니다.** v1부터 이 항목은 "8GB 모델을 반복 로드/해제하며 파일 페이지 캐시가 통합 메모리를 채운다"고 추정해 왔고, v7 초판은 그 자리에 `--probe residue`의 "반환되지 않는 16.35GB 풀"을 넣으면서 스왑이 **"3.6 → 13.2GB로 올랐다"**고 적었습니다. **그 두 숫자는 최소·최대이지 처음·마지막이 아닙니다**(`audit.py`가 `min → max`를 인쇄). 측정 순서대로 보면 단조 증가가 없습니다:
-
-  ```
-  ballast 0:  첫 4.46 → 마지막 5.76 GB   측정순서와의 Spearman = −0.047
-  ballast 8:  첫 5.74 → 마지막 7.46 GB   측정순서와의 Spearman = −0.090
-  ```
-
-  v8에서 `--probe residue`를 MB 해상도·8회로 다시 돌려 이 불일치를 해소했습니다(`results/probe_residue.log`):
-
-  ```
-  1회차 잔여 (풀 확보)      16930 MB
-  2회차 이후 측정당 잔여    −27.4 MB   (범위 −192 ~ +32 MB, n=7)
-  생성 중 최고 driver 보유   24.90 GB  (= 이 기계의 물리 RAM)
-  ```
-
-  **누수가 아니라 고원입니다.** 첫 HF 측정이 16.4GB 풀을 확보하고 반환하지 않지만, 그 이후로는 쌓이지 않습니다(2회차 이후 순잔여 음수). 프로브와 스윕 기록이 이제 같은 말을 합니다 — **압박은 실재하고 크지만, 시간에 따라 누적되지는 않습니다.**
-
-  실제로 스왑을 좌우하는 것은 시간이 아니라 **직전에 어느 config가 돌았는지**입니다(24GB 중앙 스왑: FP16 10.2 / GGUF_F16 10.0 / NF4 9.5 / Q4_K_M 5.8 GB). 전역 셔플은 여전히 필요합니다 — 드리프트가 아니라 **config 간 상호 오염**을 흩기 때문입니다. 그리고 **"24GB 대조군"은 압박 없는 상태가 아닙니다**: 매 HF 생성이 물리 RAM 한계를 칩니다.
-
-- **스톨 세금(1000/p50 ÷ 평균 tok/s)에는 실패 모드가 넷 있습니다.** 절대 p50과 함께 읽어야 하고, 단독으로는 결론에 쓰면 안 됩니다.
-  1. **1.0x가 두 상태를 뜻합니다** — "매끄럽게 빠름"과 "고르게 죽어 있음". 후자의 실례가 16GB NF4@4096의 한 실행입니다(150토큰에 **126분**, p50 **69.9초**).
-  2. **나쁜 실행일수록 1.0에 가까워지고, 결국 그 아래로 내려갑니다.** 같은 셀의 행별 세금은 `[0.73, 2.16, 2.17, 2.55, 2.58]`이고 0.73이 그 126분짜리입니다. 사각지대가 아니라 **역상관**입니다.
-  3. **표에 인쇄되는 값은 "비의 중앙값"이 아니라 "중앙값의 비"입니다**(`analyze.py`가 `median(p50)`과 `median(tok/s)`를 따로 구해 나눔 — 서로 다른 실행에서 온 두 수). 16GB FP16@2048의 행별 세금은 `[0.92, 4.62, 6.12, 10.27, 10.31]`로 중앙값 6.12인데, 표에는 **8.11**이 인쇄됩니다.
-  4. **반복 간 분산에 눈이 멉니다** — 한 실행 안의 두 통계를 비교하므로, 실행 전체가 함께 움직이면 1.0x가 유지됩니다. 24GB `Q4_K_M @2048`은 p50이 1.77배 흔들리는데 다섯 실행 모두 1.0x입니다.
-
-  더 나은 지표가 이미 데이터에 있습니다 — `step_ms_p90 / step_ms_p50`은 "상위 10% 스텝이 중앙값의 몇 배인가"를 직접 재고, 위 네 실패 모드 중 셋에 걸리지 않습니다. 아직 표로 만들지 않았습니다([Next steps](#next-steps)).
-- **CUDA 교차검증은 v1 버그 방식이라 제외**했습니다(`results/results_cuda_t4_colab_v1_double_prefill_bug.jsonl`). C-1은 CUDA도 비동기라 동일 발현하므로 현 프로토콜로 재측정해야 유효합니다. **현재 결론은 전부 Apple Silicon 통합 메모리 기준**이며, mmap 우위가 별도 VRAM을 가진 GPU에서도 성립하는지는 미검증입니다.
-- **모델 크기는 설계가 강제한 것입니다.** 2×2의 FP16 팔이 성립하려면 FP16 가중치가 16GB에 들어가야 하고, 4B(~8GB)는 그 조건을 만족하는 최대 크기입니다(7B는 ~14GB, 8B는 ~16GB로 불가). 따라서 **실사용자가 16GB에서 실제로 돌릴 구성(7~14B의 4비트)과는 다릅니다** — 이 리포트의 목적은 요인 분해이지 기종별 최적 모델 추천이 아닙니다.
-- **MPS Peak VRAM은 20ms 폴링 근사**로 짧은 스파이크를 놓칠 수 있습니다. NF4의 절대 VRAM 증가가 FP16보다 큰 원인은 미규명입니다.
-- **GGUF 경로는 매 측정 워밍업 후 `llm.reset()`으로 캐시를 비워** 매번 완전한 prefill을 강제합니다 — 접두사가 재사용되는 실사용 멀티턴 대화보다 보수적(불리한) 조건입니다.
-- **속도 지표는 커널 프로파일링이 아닌 end-to-end 측정**입니다. NF4가 느린 원인(디퀀타이즈 커널 융합 부재)은 아키텍처 지식 기반 추정입니다.
-
-## Next steps
-
-1. ~~C-1(async TTFT 누출)·M-1(GGUF 청크 카운트)·D-8 수정~~ (완료 — 실측 검증)
-2. ~~반복+무작위 순서+per-shape 워밍업 프로토콜로 context_sweep 재측정~~ (완료)
-3. ~~ballast.py 순회 버그 수정 + pressure_probe 재설계~~ (완료, 도구 검증됨)
-4. ~~`pressure_probe --ballast-gb 0,8,16` 실행~~ (완료 — mmap 가설 재확인)
-5. ~~반복 블록 편향 수정(전역 셔플) + 행별 타임스탬프·스왑·ballast 기록~~ (완료 — v6, 편향 −21~25% → ±4%)
-6. ~~깨끗한 context_sweep 재측정 + 16GB 용량 축 추가~~ (완료 — v6, 감사 통과)
-7. ~~FP16 @2048 절벽 원인 규명~~ (완료 — v7. `make_long_prompt`·SDPA 백엔드 모두 반증, 정체는 KV 캐시 재할당 스톨 + 평균 지표. [해소 절](#왜-이렇게-쟀는가--지표-선택이-결론을-만든-기록))
-8. ~~스텝별 지연 계측 + 5회 재측정~~ (완료 — v7, 200행)
-8b. ~~외부 검토 후속: 대표 수치를 정상상태 기하평균으로 교체, 원시 스텝 배열 저장, 감사에 분산 게이트, 프로브 로그 보관, C를 방법 정당화로 강등~~ (완료 — v8)
-9. **driver 메모리 증가 곡선을 ctx별로 측정** — 최우선. `--probe alloc`이 "생성마다 24.9GB까지 차오름, 스톨은 59~69스텝에 뭉침"까지 밝혔으므로, 남은 질문은 **증가율이 ctx에 따라 어떻게 변하고 임계를 언제 넘느냐**다. 이게 "왜 2048이 4096보다 심한가"의 답일 가능성이 높음(4096은 임계를 프리필 직후에 넘어 초반에 몰아서 겪고 회복 — `--probe steps`의 4096 데실 패턴과 일치). 촘촘한 ctx 스윕은 그 다음
-10. **스텝 계측을 붙여 `pressure_probe`의 mmap A/B 재실행** — 가중치 mmap과 KV 선할당 중 GGUF 강건함에 어느 쪽이 얼마나 기여하는지 분해. 현재 v4 데이터에는 스텝 통계가 없어 사후 분해 불가
-11. NF4 디퀀타이즈 오버헤드 커널 프로파일링, NF4 VRAM 증가 원인 규명(폴링 간격 축소 대조)
-12. 현 프로토콜로 CUDA(Colab T4) 재교차검증 — mmap 우위가 통합 메모리 특유인지 판별. **CUDA는 페이징 대신 OOM이므로 스톨 현상 자체가 다르게 나타날 것**
-13. `--ballast-gb 16`(=8GB 기계) — FP16이 아예 못 돌 가능성이 높고, 그것도 결과
-14. Q4_K_M 팔만 7~8B로 확장 — 요인 분해는 4B에서 유지하되 실사용 대표성 확보
-15. **외부 검토 v7 후속** — `notes/review-v7-2026-08-11.md`가 지적한 도구 결함들:
-    원시 스텝 배열을 행에 저장(추정량 문제를 근본 해소, 200행 300KB) ·
-    `analyze.py`에 정상상태/최소오염 열 + 부트스트랩 CI 실제 구현(현재 README 값이 코드로 재생성되지 않음) ·
-    `analyze.py`에 `p90/p50` 표(이미 있는 데이터) · `audit.py`에 셀별 `CV(step_ms_p50)` 게이트, `--repeats` 기본 5 ·
-    `cliff_probe.py --probe residue`에 `--rounds` 노출·바이트 단위 출력·실제 config 순환 재현 ·
-    `output_agreement.py`의 `zip` 제거와 GGUF 토큰 ID 직접 수집 ·
-    **모든 프로브 출력을 `results/`에 커밋**(현재 v7 인과 설명 전체가 무보관 콘솔 출력) ·
-    `Llama(verbose=True)` 파싱으로 GGUF VRAM 축 완성
-16. GitHub push → Zenodo → DOI (위 마무리 후)
-
-## Citation
-
-`CITATION.cff` 참고 (저자명/저장소 TODO).
+- **Apple Silicon unified memory only.** A CUDA cross-check exists only in the v1 (buggy) protocol and is excluded. Whether the mmap advantage holds on a GPU with separate VRAM is untested.
+- **One model, sized by the design.** The 16-bit arm must fit in 16GB, which makes 4B the largest usable size. This is a factor decomposition, not a recommendation of what to run on a 16GB Mac.
+- **End-to-end timing, not kernel profiling.** The NF4 explanation in finding 1 is an inference.
+- **n = 5.** Some comparisons, such as whether context length adds the same absolute cost per token at both precisions, are consistent with the roofline prediction but the bootstrap intervals are too wide to call them equal; the full report marks which pairs are undecided.
+- **The 16GB machine is simulated** by pinning resident memory on a 24GB M3, which has the same bandwidth and core count but is not identical.
 
 ## License
 
-Code: MIT (`LICENSE`). Report/데이터: CC-BY-4.0 권장.
+Code: MIT ([LICENSE](LICENSE)).
