@@ -57,7 +57,7 @@ MacBook Air(M3)에서 언어 모델 Qwen3-4B를 **실행 프로그램 2가지(tr
 | 실행 환경 | transformers: PyTorch MPS · llama.cpp: Metal 빌드 |
 | 소프트웨어 | Python 3.12, torch 2.13.0, transformers 5.14.1, bitsandbytes 0.50.0, accelerate 1.14.0, llama-cpp-python 0.3.34, datasets 5.0.1, numpy 2.5.1. 측정에 쓴 가상환경에서 나중에 읽은 버전입니다. 전체 목록: [environment/requirements-measured.txt](environment/requirements-measured.txt) |
 | 모델 | transformers: `Qwen/Qwen3-4B-Instruct-2507` · llama.cpp: `unsloth/Qwen3-4B-Instruct-2507-GGUF`의 F16·Q4_K_M 파일(판본과 파일 해시: [environment/model-files.txt](environment/model-files.txt)) |
-| 측정 코드 | v6 커밋(`b3a161c`) 이후의 작업본. 같은 계측 코드는 다음 날 `b3b9c33`으로 커밋 |
+| 측정 코드 | v6 커밋([`570caaa`](https://github.com/AhnJG/qwen3-4b-mac-quantization-benchmark/commit/570caaa)) 이후의 작업본. 같은 계측 코드는 다음 날 [`f83d79e`](https://github.com/AhnJG/qwen3-4b-mac-quantization-benchmark/commit/f83d79e)로 커밋 |
 | 측정 | 2026-08-09. 4가지 방식 × 입력 길이 5가지(128–4096 토큰) × 메모리 2가지 × 5회 = 200회. 측정마다 150 토큰 생성, 측정 순서는 메모리 조건마다 무작위 |
 | 품질 측정 | WikiText-2 테스트 세트 전체(299,078 토큰)의 perplexity. 답변의 정확도나 지시 수행 능력은 평가하지 않았습니다 |
 

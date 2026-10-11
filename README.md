@@ -57,7 +57,7 @@ Results by input length, the 16GB results and the diagnostic tests on why stalls
 | Runtime | transformers: PyTorch MPS · llama.cpp: Metal build |
 | Software | Python 3.12, torch 2.13.0, transformers 5.14.1, bitsandbytes 0.50.0, accelerate 1.14.0, llama-cpp-python 0.3.34, datasets 5.0.1, numpy 2.5.1, read afterwards from the virtual environment used for the measurements. Full list: [environment/requirements-measured.txt](environment/requirements-measured.txt) |
 | Models | transformers: `Qwen/Qwen3-4B-Instruct-2507` · llama.cpp: F16 and Q4_K_M files from `unsloth/Qwen3-4B-Instruct-2507-GGUF` (revision and file hashes: [environment/model-files.txt](environment/model-files.txt)) |
-| Measurement code | The working copy after the v6 commit (`b3a161c`); the same instrumentation was committed the next day as `b3b9c33` |
+| Measurement code | The working copy after the v6 commit ([`570caaa`](https://github.com/AhnJG/qwen3-4b-mac-quantization-benchmark/commit/570caaa)); the same instrumentation was committed the next day as [`f83d79e`](https://github.com/AhnJG/qwen3-4b-mac-quantization-benchmark/commit/f83d79e) |
 | Measurements | 2026-08-09. 4 setups × 5 input lengths (128–4096 tokens) × 2 memory sizes × 5 repeats = 200. Each measurement generates 150 tokens; run order shuffled within each memory size |
 | Quality | Perplexity on the full WikiText-2 test set (299,078 tokens). Answer accuracy and instruction following were not evaluated |
 
