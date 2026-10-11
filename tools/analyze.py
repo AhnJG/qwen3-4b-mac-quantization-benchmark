@@ -1,9 +1,10 @@
 """
 tools/analyze.py
 
-Regenerate every number quoted in README.md from a results file,
-so the report is reproducible from the raw data by one command rather than by
-trusting numbers someone typed once.
+Regenerate the speed tables of the reports from a results file, so they are
+reproducible from the raw data rather than from numbers someone typed once.
+(Perplexity, the mmap A/B and the probe tables come from their own files;
+tools/claims.py prints every number the READMEs quote, with its source.)
 
 Reports, per capacity level (`ballast_gb`) present in the file:
   * headline table at ctx=128
@@ -101,6 +102,17 @@ def boot_gap(d, bal, c1, c2, agg, n=20000, seed=0):
     return out[int(0.025 * n)], out[int(0.975 * n)]
 
 
+def e2e_seconds(r):
+    """Timed generation of one run: TTFT + decode time. tokens_per_sec is
+    (n_new - 1) / decode_time, so decode_time = (n_new - 1) / tokens_per_sec."""
+    return r["ttft_s"] + (r["n_new"] - 1) / r["tokens_per_sec"]
+
+
+def e2e_median(d, bal, cfg, ctx):
+    v = [e2e_seconds(r) for r in d.get((bal, cfg, ctx), []) if r.get("tokens_per_sec")]
+    return st.median(v) if v else float("nan")
+
+
 def ratio_across_ctx(d, bal, num, den):
     """Steady-state speed ratio num/den at every context, plus their geometric
     mean. -> ([r_128, ..., r_4096], geomean)
@@ -135,6 +147,27 @@ def report_level(d, bal):
         print(f"  {name:<14}{('—' if v is None else f'{v:.2f}'):>10}"
               f"{med(d, bal, k, 128):>9.2f}{med(d, bal, k, 128, 'ttft_s'):>9.2f}")
 
+    has_steps = all(med(d, bal, k, x, "step_ms_p50") is not None for k, _ in CONFIGS for x in CTX)
+    if not has_steps:
+        print("\n  (이 파일에는 일부 셀의 step_ms_p50이 없어 정상 상태 분해·절대 지연 증가·CI를 건너뜁니다.)")
+    else:
+        report_steady(d, bal)
+
+    print("\n컨텍스트 스케일링 — decode tok/s, 중앙값 [최소–최대]")
+    print(f"  {'ctx':>5}  " + "".join(f"{n:<26}" for _, n in CONFIGS))
+    for x in CTX:
+        cells = []
+        for k, _ in CONFIGS:
+            m = med(d, bal, k, x)
+            if m is None:
+                cells.append(f"{'—':<26}")
+                continue
+            lo, hi, n = spread(d, bal, k, x)
+            cells.append(f"{m:6.2f} [{lo:5.2f}-{hi:5.2f}]{'' if n >= 3 else f' n={n}':<5}")
+        print(f"  {x:>5}  " + "".join(f"{c:<26}" for c in cells))
+
+
+def report_steady(d, bal):
     print("\n배수 분해 — 정상 상태 속도비, 컨텍스트별 값과 기하평균")
     print("  (속도비 = p50(분모) / p50(분자). p50은 반복 5회의 중앙값)")
     print(f"  {'':<10}{'':<24}" + "".join(f"{x:>8}" for x in CTX) + f"{'기하평균':>11}")
@@ -147,15 +180,6 @@ def report_level(d, bal):
           "\n  컨텍스트에 따라 크게 변합니다. tokens_per_sec가 아니라 스텝 p50을 쓰는"
           "\n  이유는 아래 '정상 상태 vs 스톨 포함'을 참고하십시오.")
 
-    print("\n컨텍스트 스케일링 — decode tok/s, 중앙값 [최소–최대]")
-    print(f"  {'ctx':>5}  " + "".join(f"{n:<26}" for _, n in CONFIGS))
-    for x in CTX:
-        cells = []
-        for k, _ in CONFIGS:
-            m = med(d, bal, k, x)
-            lo, hi, n = spread(d, bal, k, x)
-            cells.append(f"{m:6.2f} [{lo:5.2f}-{hi:5.2f}]{'' if n >= 3 else f' n={n}':<5}")
-        print(f"  {x:>5}  " + "".join(f"{c:<26}" for c in cells))
 
     print("\n정상 상태 vs 스톨 포함 — 커널이 느린가, 멈추는가")
     print(f"  {'Config':>14}  " + "".join(f"{x:>16}" for x in CTX))
@@ -204,10 +228,10 @@ def report_level(d, bal):
             print(f"    {label} · {aname:<10} 격차 {g:>+6.1f} ms   "
                   f"CI [{lo:>+6.1f}, {hi:>+6.1f}]{mark}")
 
-    print("\n150토큰 생성 전체 소요 (프리필 포함, 초)")
+    print("\n150토큰 생성 전체 소요 (프리필 포함, 초) — 실행별 TTFT + (n_new−1)/tok/s의 중앙값")
     print(f"  {'Config':<14}" + "".join(f"{x:>9}" for x in CTX))
     for k, name in CONFIGS:
-        row = "".join(f"{med(d, bal, k, x, 'ttft_s') + 150 / med(d, bal, k, x):>9.0f}" for x in CTX)
+        row = "".join(f"{e2e_median(d, bal, k, x):>9.0f}" for x in CTX)
         print(f"  {name:<14}{row}")
 
 
@@ -225,7 +249,8 @@ def report_capacity_delta(d, lo_bal, hi_bal):
         print(f"  {name:<14}" + "".join(cells))
     print(f"\n  최악 저하 — mmap 그룹(GGUF) {min(groups['mmap']):+.1f}%  vs  "
           f"상주 그룹(HF) {min(groups['resident']):+.1f}%")
-    print("  → 연속 스펙트럼이 아니라 두 범주로 갈립니다. 1차 요인은 정밀도가 아니라 메모리 전략입니다.")
+    print("  → 연속 스펙트럼이 아니라 두 범주로 갈립니다. 단 이 구분은 엔진 구분과 겹쳐 있어,")
+    print("    이 스윕만으로는 메모리 전략의 효과를 엔진의 다른 차이와 분리할 수 없습니다.")
 
 
 def main():

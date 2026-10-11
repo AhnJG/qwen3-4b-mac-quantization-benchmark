@@ -10,5 +10,5 @@ pandas
 matplotlib
 tqdm
 
-# llama-cpp-python is installed separately with CUDA support -- see README.md
+# llama-cpp-python is installed separately (Metal build on Apple Silicon) -- see README.md
 # (a plain `pip install llama-cpp-python` here would give a CPU-only build)

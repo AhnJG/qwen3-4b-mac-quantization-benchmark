@@ -16,3 +16,7 @@ notes/
 CLAUDE.md
 AGENTS.md
 .claude/
+
+# local re-runs and quick tests (keep results/ for the audited data only)
+results/smoke/
+results/rerun/

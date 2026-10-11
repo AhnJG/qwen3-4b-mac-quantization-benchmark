@@ -49,7 +49,7 @@ def gm(v):
 
 
 def fig_opposite(d, out):
-    """Same 4 bits, opposite directions (24GB control)."""
+    """Both called 4-bit, opposite directions (24GB control)."""
     p = lambda cfg, x: med(d, 0.0, cfg, x, "step_ms_p50")
     kq = [p("GGUF_F16", x) / p("GGUF_Q4_K_M", x) for x in CTX]
     nf = [p("FP16", x) / p("NF4_4bit", x) for x in CTX]
@@ -73,7 +73,7 @@ def fig_opposite(d, out):
         ax.annotate(lab, (len(CTX) - 1, ys[-1]), xytext=(14, 0), textcoords="offset points",
                     color=INK, fontsize=9.5, va="center", annotation_clip=False)
     ax.set_ylabel("Decode speed vs 16-bit baseline", color=INK2, fontsize=10)
-    header(fig, "Same 4 bits, opposite directions",
+    header(fig, "Both called 4-bit, opposite directions",
            "Steady-state decode speed relative to the same engine's 16-bit weights "
            "(geometric mean in label)\nQwen3-4B-Instruct · Apple M3 24GB · per-step p50, "
            "median of 5 runs")
@@ -105,9 +105,9 @@ def fig_cliff(d, out):
     ax.annotate(f"×{p50_ms[j] / p50_ms[i]:.2f}", (j, p50_ms[j]),
                 xytext=(0, 12), textcoords="offset points", color=INK, fontsize=9.5, ha="center")
     ax.set_ylabel("ms per generated token", color=INK2, fontsize=10)
-    header(fig, "The 2048-token \"cliff\" was the metric, not the kernel",
+    header(fig, "The 2048-token \"cliff\" came mostly from rare stalls",
            "HF transformers FP16 · Apple M3 24GB · median of 5 runs\n"
-           "A few multi-second stalls dominate the mean; the per-step median rises only modestly")
+           "The mean includes a few multi-second stalls (total waiting time); the per-step median shows the typical token")
     fig.savefig(os.path.join(out, "fig2_cliff_was_metric.png"), facecolor=SURFACE)
     plt.close(fig)
     return mean_ms, p50_ms

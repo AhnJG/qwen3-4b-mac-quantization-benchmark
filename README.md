@@ -1,131 +1,132 @@
-# On-Device LLM Quantization Benchmark — Qwen3-4B on Apple Silicon
+# On-Device LLM Quantization Benchmark — Qwen3-4B on a MacBook
 
 [한국어](README.ko.md)
 
-A controlled 2×2 comparison of **inference engine × weight precision** for `Qwen/Qwen3-4B-Instruct-2507` on an Apple M3 MacBook Air, at two memory capacities (24GB, and a 16GB machine simulated by pinning 8GB). The current dataset is **200 audited runs** (4 configs × 5 context lengths × 2 capacities × 5 repeats). Every table and figure is regenerated from the raw rows by one command.
+A personal study comparing the speed and language-modeling quality (WikiText-2 perplexity) of the language model Qwen3-4B on a MacBook Air (M3), run with **2 programs (transformers, llama.cpp) × 2 number precisions (16-bit, 4-bit)**. The raw data from 200 measurements and the analysis code are included.
 
-|  | HF transformers (PyTorch MPS) | llama.cpp (Metal) |
+> A fuller explanation of the results is in [docs/details.md](docs/details.md). Every table ([docs/full-report.ko.md](docs/full-report.ko.md)) and the history of measurement mistakes found and fixed ([docs/measurement-history.ko.md](docs/measurement-history.ko.md)) are in Korean.
+
+## Takeaways
+
+Speed ratios below compare the usual time per token (the median over the 150 generated tokens) and are geometric means over the 5 input lengths (128–4096 tokens), with the range by input length in brackets. The table under Results shows only 128 tokens, so dividing its numbers gives one value inside that range.
+
+- **Two methods both called 4-bit went in opposite directions.** With 24GB of memory, llama.cpp 4-bit became 2.58× faster than its own 16-bit version (2.35–2.84×), while transformers 4-bit became 2.48× slower (0.36–0.46× the 16-bit speed). llama.cpp 4-bit also lost less quality (perplexity +2.13% vs +2.77%). The two 4-bit methods differ in detail, which is a suspected cause of part of the quality gap (see Limitations).
+- **Most of the "3.3× faster" comes from 4-bit.** Going from transformers 16-bit to llama.cpp 4-bit is 3.28× faster (2.79–3.67×). Split into two steps starting from 16-bit, switching the program gives 1.27× and switching to 4-bit 2.58×. By input length these were 1.16–1.49× and 2.35–2.84×. Because the effect of 4-bit depends on the program, this split does not mean each factor has an independent contribution.
+- **For transformers 16-bit, most of the sharp slowdown at 2048 input tokens came from rare stalls.** At 24GB, going from 1024 to 2048 tokens, the average speed dropped 3.38×, but the usual time per token (the median) only 1.28×, because a few of the 150 tokens stalled for seconds. Stalls are real waiting time, so the average (total waiting time) and the median (typical token delay) should be read together.
+- **With 16GB of memory the gap grows to minutes.** The same job (2048-token input, 150 tokens generated) took llama.cpp 4-bit 14 seconds and transformers 16-bit 4.4–7.7 minutes, depending on the run. This transformers result varied the most between runs, so read it as a range.
+
+## What was compared
+
+|  | transformers | llama.cpp |
 |---|---|---|
-| **16-bit** | HF FP16 (baseline) | GGUF F16 |
-| **4-bit** | HF NF4 (bitsandbytes) | GGUF Q4_K_M (K-quant) |
+| **16-bit** | transformers 16-bit (FP16) — baseline | llama.cpp 16-bit (F16) |
+| **4-bit** | transformers 4-bit (NF4) | llama.cpp 4-bit (Q4_K_M) |
 
-Including GGUF F16 is what lets the two effects be separated: comparing "GGUF Q4_K_M vs HF FP16" alone changes the engine and the precision at the same time.
+- **transformers**: Hugging Face's Python library, the most common way to run models in research.
+- **llama.cpp**: a lightweight C/C++ program for running models, widely used on laptops and PCs. Its model files use the GGUF format.
+- **16-bit (FP16 / F16)**: each number stored in 16 bits, the original precision. **4-bit** stores most of the weights in 4 bits instead (quantization); transformers' format is NF4 and llama.cpp's is Q4_K_M. Neither is 4-bit throughout: Q4_K_M keeps some weights at 6 bits, and NF4 leaves the embedding and output layers at 16 bits.
+- **Why llama.cpp 16-bit is included**: comparing only "transformers 16-bit" and "llama.cpp 4-bit" changes the program and the bit count at once, so you cannot tell which one made the difference. Adding llama.cpp 16-bit in between separates the two.
+- **Why two memory sizes**: I only have one 24GB Mac, but wanted to see what happens on the common 16GB Mac. So another program held on to 8GB the whole time to reduce the memory left for the model. Same machine and same procedure; the only intended change is the extra 8GB taken up. Chrome and the Claude app were also left open on purpose, because a small model is often run alongside other programs; how much they were used was not monitored (see Limitations).
 
-## Key findings
+## Results
 
-### 1. The same 4 bits move in opposite directions
+![Both called 4-bit, opposite directions](figures/fig1_same_4bit_opposite.png)
 
-![Same 4 bits, opposite directions](figures/fig1_same_4bit_opposite.png)
+128 input tokens, 24GB of memory, median of 5 runs:
 
-Relative to its own engine's 16-bit weights, llama.cpp's **K-quant runs 2.58× faster** (2.35–2.84× across contexts), while bitsandbytes **NF4 runs 2.48× slower** (0.36–0.46×). K-quant also loses less quality: WikiText-2 perplexity 9.7446 vs 9.8060 (+2.13% vs +2.77% over the 16-bit baseline). Within this grid there is no inference setting in which NF4 is the better choice. This is the most robust result in the repository: it holds at every context length, at both capacities, and under every estimator I tried.
-
-**Weight size does not set the ranking — kernel support does.** HF NF4 (2.9GB of weights) is about **3.3× slower** than GGUF F16 (8GB of weights) at both capacities (2.7–3.4× across contexts). A likely explanation is that K-quant uses fused dequantize-and-matmul inference kernels, while NF4 was designed to save memory during QLoRA *training* and has no comparable Metal path. This is an inference from architecture, not from kernel profiling.
-
-### 2. "3.3× faster" is mostly quantization, not the engine
-
-| 24GB, steady-state speed ratio | 128 | 512 | 1024 | 2048 | 4096 | **Geo. mean** |
-|---|---|---|---|---|---|---|
-| Engine `GGUF-F16 / HF-FP16` | 1.16 | 1.22 | 1.30 | 1.49 | 1.19 | **1.27×** |
-| K-quant `Q4_K_M / GGUF-F16` | 2.84 | 2.70 | 2.60 | 2.46 | 2.35 | **2.58×** |
-| NF4 `HF-NF4 / HF-FP16` | 0.36 | 0.38 | 0.39 | 0.46 | 0.44 | **0.40×** |
-| Total `Q4_K_M / HF-FP16` | 3.30 | 3.29 | 3.40 | 3.67 | 2.79 | **3.28×** |
-
-The 3.28× total factors into an engine effect of 1.27× and a quantization effect of 2.58×. The engine still matters for another reason: it is the only place in this grid where 4-bit actually pays off (finding 1).
-
-### 3. A context-length "cliff", reproduced in four versions, was the metric
-
-![The 2048-token cliff was the metric](figures/fig2_cliff_was_metric.png)
-
-From v3 to v6, HF FP16 throughput collapsed between 1024 and 2048 tokens and partly recovered at 4096, and the pattern reproduced every time. Logging every decode step showed the reason: `tokens_per_sec = tokens / total time` is a **mean**, and a handful of multi-second stalls out of 150 steps dominate it. Going from 1024 to 2048 tokens, the mean-based cost rises **3.38×**; the per-step median rises **1.28×**. Pre-allocating the KV cache (`StaticCache`) removes the stalls. HF's default `DynamicCache` reallocates the cache at every step, and each HF FP16 generation pushes the driver's memory up to the machine's full 24GB; that the stalls are the OS reclaiming memory at this limit is consistent with the probes but not proven.
-
-This is not a new insight. Percentile reporting is standard practice for serving benchmarks (MLPerf Inference SingleStream uses p90), Agrawal et al. (arXiv:2507.09019) and *Etalon* (arXiv:2407.07000) name throughput metrics that hide generation stalls as a known pitfall, and Mytkowicz et al. (ASPLOS '09) show how measurement bias produces reproducible wrong conclusions. What this repository documents is that the practice has not yet reached on-device tools: MLPerf Client reports average tokens/s, and `llama-bench` reports mean ± std across repeats.
-
-### 4. Under memory pressure the gap becomes minutes
-
-On a 16GB machine, llama.cpp's steady-state speed does not react at all (stall tax 1.0× in all 20 cells); it reserves the KV cache once at load time and memory-maps the weights. HF FP16 generating 150 tokens from a 2048-token prompt takes **about 7 minutes**, about 5 minutes 44 seconds of which is stall time; llama.cpp Q4_K_M takes **14 seconds**. Memory pressure does not create the NF4–F16 kernel gap above; it amplifies it through stalls. (The audit flags two 16GB cells, FP16@2048 and NF4@4096, as too variable across repeats for any single summary to carry a conclusion; treat those numbers as illustrative.)
-
-## How the numbers are computed
-
-- **Steady state = per-step decode latency p50**, taken as the median over 5 repeats. `tokens_per_sec` is recorded but not used for conclusions, because it mixes kernel cost with stalls.
-- **Stall tax** = (1000 / step p50) ÷ mean tokens/s. A value of 1.0× means the mean is not distorted.
-- **Ratios are summarized by the geometric mean over all five context lengths, with the range.** Quoting a single context would itself be an estimator choice.
-- Run order is shuffled globally. Each row logs timestamps, swap usage and pinned memory, so contamination (sleep, swap saturation) can be checked after the fact. `tools/audit.py` is the gate before analysis.
-- Perplexity: all four configs scored by the same function on the same token sequence (full WikiText-2 test set, 299,078 tokens). The two independent F16 paths agree to 0.004% (9.5413 vs 9.5417).
-
-Headline numbers at ctx=128, 24GB, median of 5 runs (stall tax is 1.0× for all four, so the mean and the steady state agree here):
-
-| Config | Peak memory (GB) | Decode tok/s | TTFT (s) | Perplexity |
+| Setup | Peak memory (GiB) | Speed (tokens/s) | Time to first token (s) | Perplexity (lower is better) |
 |---|---|---|---|---|
-| HF FP16 (baseline) | 7.54 | 9.74 | 0.48 | 9.5413 |
-| HF NF4 (bitsandbytes) | 2.88 | 3.48 | 0.67 | 9.8060 |
-| GGUF F16 | –\* | 11.31 | 0.43 | 9.5417 |
-| GGUF Q4_K_M | –\* | 31.92 | 0.46 | 9.7446 |
+| transformers 16-bit (FP16), baseline | 7.54 | 9.74 | 0.48 | 9.5413 |
+| transformers 4-bit (NF4) | 2.88 | 3.48 | 0.67 | 9.8060 |
+| llama.cpp 16-bit (F16) | –\* | 11.31 | 0.43 | 9.5417 |
+| llama.cpp 4-bit (Q4_K_M) | –\* | 31.92 | 0.46 | 9.7446 |
 
-\* llama.cpp exposes no torch-style memory API; not measured.
+\* llama.cpp has no PyTorch-style memory counter, so it was not measured.
 
-## Measurement record
+![The 2048-token cliff came mostly from rare stalls](figures/fig2_cliff_was_metric.png)
 
-The current results are the eighth version. Across v1–v8 I found and fixed six measurement defects, each of which had changed a conclusion:
+Results by input length, the 16GB results and the diagnostic tests on why stalls happen are in [docs/details.md](docs/details.md).
 
-1. **Double prefill** — `generate()` was called twice, so prefill leaked into decode throughput.
-2. **Asynchronous timing** — on MPS, `time.time()` marked when the CPU issued work, not when the GPU finished it, so prefill leaked in again.
-3. **Sleep contamination** — one 8-hour run spent 6 hours asleep; now every run uses `caffeinate -i` and logs timestamps.
-4. **Repeat-block ordering** — running repeats in blocks biased every median by 21–25%; global shuffling reduced this to ±4%.
-5. **The metric** — the mean hid stalls (finding 3).
-6. **The estimator** — taking the minimum over repeats to "remove contamination" biased the very comparison it was used for; four claims were retracted.
+## Setup
 
-The full record, with the probes that ruled out each alternative explanation, is in [docs/measurement-history.ko.md](docs/measurement-history.ko.md) (Korean). Every table, including the 16GB and memory-pressure experiments, is in [docs/full-report.ko.md](docs/full-report.ko.md) (Korean). The estimator bias is written up in [docs/estimator-bias-note.ko.md](docs/estimator-bias-note.ko.md) (Korean). Raw data from superseded versions is kept in `results/archive/` as an audit trail.
+| Item | Details |
+|---|---|
+| Machine | MacBook Air (Apple M3, 8-core CPU · 10-core GPU) |
+| Memory | 24GB unified memory (100GB/s bandwidth). The 16GB condition was imitated by having another program hold 8GB |
+| Other programs running | Chrome and the Claude app, left open on purpose to resemble everyday use; their memory and CPU use were not recorded |
+| Runtime | transformers: PyTorch MPS · llama.cpp: Metal build |
+| Software | Python 3.12, torch 2.13.0, transformers 5.14.1, bitsandbytes 0.50.0, accelerate 1.14.0, llama-cpp-python 0.3.34, datasets 5.0.1, numpy 2.5.1, read afterwards from the virtual environment used for the measurements. Full list: [environment/requirements-measured.txt](environment/requirements-measured.txt) |
+| Models | transformers: `Qwen/Qwen3-4B-Instruct-2507` · llama.cpp: F16 and Q4_K_M files from `unsloth/Qwen3-4B-Instruct-2507-GGUF` (revision and file hashes: [environment/model-files.txt](environment/model-files.txt)) |
+| Measurement code | The working copy after the v6 commit (`b3a161c`); the same instrumentation was committed the next day as `b3b9c33` |
+| Measurements | 2026-08-09. 4 setups × 5 input lengths (128–4096 tokens) × 2 memory sizes × 5 repeats = 200. Each measurement generates 150 tokens; run order shuffled within each memory size |
+| Quality | Perplexity on the full WikiText-2 test set (299,078 tokens). Answer accuracy and instruction following were not evaluated |
 
 ## Reproduce
 
-Apple Silicon (MPS / Metal), which is the path all numbers above were measured on:
+Without a GPU, the speed tables and both figures can be rebuilt from the raw data in this repository, and the README's key numbers checked against it. It takes seconds and needs only Python 3 and matplotlib.
 
 ```bash
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-CMAKE_ARGS="-DGGML_METAL=on" pip install --no-cache-dir --force-reinstall llama-cpp-python
-
-# caffeinate -i is required: sleep silently corrupts wall-clock timing
-caffeinate -i python benchmark_quantization.py --stage context_sweep --repeats 5                  # 24GB
-caffeinate -i python benchmark_quantization.py --stage context_sweep --repeats 5 --ballast-gb 8   # 16GB
-python benchmark_quantization.py --stage perplexity
-
-python tools/audit.py --repeats 5   # integrity gate
-python tools/analyze.py             # regenerates every table from results/results.jsonl
-python tools/figures.py             # regenerates the two figures
+python tools/audit.py --repeats 5   # check the data (sleep gaps, missing runs, variance)
+python tools/analyze.py             # speed tables
+python tools/figures.py             # the two figures
+python tools/claims.py --check      # key README numbers, checked sentence by sentence against the raw data
 ```
 
-**On a larger machine the stall results will not appear, and that is expected.** Stalls happen because HF pushes memory to the machine's physical limit. With 64GB or more, the stall tax is 1.0× everywhere; findings 1 and 2 (kernel and precision) reproduce, while findings 3 and 4 (stalls) disappear. To reproduce the pressure, pin memory with `--ballast-gb` so the effective capacity is 24GB or 16GB (on a 64GB machine, `40` and `48`).
+To measure again from scratch on an Apple Silicon Mac (the original run took about 1.3 hours at 24GB and 4.1 hours at 16GB), see [docs/reproduce.md](docs/reproduce.md).
 
-## Repository layout
+## Files
 
 ```
-benchmark_quantization.py   # the sweep: context_sweep and perplexity stages
+benchmark_quantization.py   # the benchmark: context_sweep and perplexity stages
 tools/
-  audit.py                  # integrity gate: sleep gaps, incomplete cells, token counts, per-cell variance
-  analyze.py                # regenerates every table from results/results.jsonl
-  figures.py                # regenerates the README figures
-  cliff_probe.py            # stall diagnostics (prompt, SDPA backend, per-step, cache, allocator, residue)
-  output_agreement.py       # where the four configs' greedy outputs diverge
-  ballast.py, pressure_probe.py   # memory-capacity simulation and mmap on/off A/B
-results/
-  results.jsonl             # 200 audited rows (current data)
+  audit.py                  # data check: sleep gaps, missing or short runs, token counts, variance
+  analyze.py                # speed tables from results/results.jsonl
+  figures.py                # the README figures
+  claims.py                 # every README number with its source; --check compares it with the docs
+  cliff_probe.py            # diagnostic tests for the stalls
+  output_agreement.py       # where the four setups' outputs start to differ
+  ballast.py, pressure_probe.py   # holding memory to imitate a smaller Mac; mmap on/off test
+results/                    # raw data (see results/README.md for every field)
+  results.jsonl             # 200 audited measurements (current data)
   results_perplexity_v7.jsonl
   results_memory_pressure.jsonl
-  probe_*.log               # saved probe outputs behind the causal claims
-  archive/                  # data from superseded versions, kept as an audit trail
-docs/                       # full report, measurement history, estimator note (Korean)
+  probe_*.log               # saved outputs of the diagnostic tests
+  archive/                  # data from older, superseded versions
+docs/
+  details.md, details.ko.md # README results explained in detail
+  reproduce.md, reproduce.ko.md # how to measure again from scratch
+  full-report.ko.md         # every table (Korean)
+  measurement-history.ko.md # measurement mistakes found and fixed (Korean)
+  estimator-bias-note.ko.md # why "pick the fastest run" was biased (Korean)
 figures/
 ```
 
+What each field in the raw data means is described in [results/README.md](results/README.md).
+
+## Measurement record
+
+The repository went through versions v1 to v8; the current data was measured in v7 (2026-08-09). Along the way six measurement mistakes were found and fixed, several of them by independent AI reviews; I decided which findings to accept and what to retract. The six were: input processing leaking into the generation speed, timing the GPU at the wrong moment, the computer sleeping mid-run, skew from repeating the same setup back-to-back, the average hiding stalls, and skew from picking the fastest of the repeats. How each was found and fixed is in [docs/measurement-history.ko.md](docs/measurement-history.ko.md) (Korean).
+
+## Roles
+
+- **Me**: setting the research question, adopting the experiment design proposed by AI (2×2 engine × precision), designing the memory conditions (24GB and an imitated 16GB), stopping and rolling back experiments that went in the wrong direction, and the final decisions on retracting weakly supported claims and on what to publish
+- **AI coding tools (Claude, Codex)**: drafting the background research and plan, writing the measurement and analysis code, drafting documents, recomputing numbers from the raw data
+- **AI review**: independent reviews looking for measurement defects and overstated wording; I decided which findings to accept
+
 ## Limitations
 
-- **Apple Silicon unified memory only.** A CUDA cross-check exists only in the v1 (buggy) protocol and is excluded. Whether the mmap advantage holds on a GPU with separate VRAM is untested.
-- **One model, sized by the design.** The 16-bit arm must fit in 16GB, which makes 4B the largest usable size. This is a factor decomposition, not a recommendation of what to run on a 16GB Mac.
-- **End-to-end timing, not kernel profiling.** The NF4 explanation in finding 1 is an inference.
-- **n = 5.** Some comparisons, such as whether context length adds the same absolute cost per token at both precisions, are consistent with the roofline prediction but the bootstrap intervals are too wide to call them equal; the full report marks which pairs are undecided.
-- **The 16GB machine is simulated** by pinning resident memory on a 24GB M3, which has the same bandwidth and core count but is not identical.
+- Measured on one Apple Silicon machine (MacBook Air M3) only. Whether results hold on a GPU with separate memory is untested.
+- One model (Qwen3-4B), chosen because its 16-bit version must fit in 16GB. This separates causes; it is not advice on what to run on a 16GB Mac.
+- Total time was measured, not individual GPU routines. Why transformers 4-bit is slow is an educated guess.
+- 5 repeats, and 1–2 runs per setting for the diagnostic tests. Some comparisons cannot be decided with this many (marked in the details).
+- The two "4-bit" setups do not store the same number of bits per weight: Q4_K_M keeps some weights at 6 bits, and NF4 keeps the embedding and output layers at 16 bits. The average bits per weight were not measured. This is a suspected cause of part of the quality difference (+2.13% vs +2.77%). It is less likely to explain the speed difference: transformers 4-bit was slower even than llama.cpp 16-bit, which stores far more bits (see details).
+- On the llama.cpp side, each streamed chunk was counted as one token. A chunk can hold more than one token, so the unit is not guaranteed to match transformers' tokens exactly (30 llama.cpp measurements counted 149 instead of 150).
+- The 16GB condition was imitated on a 24GB machine by taking up memory; it is not identical to a real 16GB Mac.
+- I did not check whether the llama.cpp 4-bit file was made with calibration data (an importance matrix); if so, that could favour it in the perplexity comparison.
+- Chrome and the Claude app were left open on purpose during the measurements, but how much they were used and how much memory they took was not monitored. Swap (memory pushed out to disk) was already 4.46GB (24GB condition) and 5.74GB (16GB condition) right after the first measurement, so the memory actually available to the model was probably less than 24GB and 16GB. The two conditions are therefore "the 24GB machine as it was" and "the same with another 8GB taken up", not exact amounts of usable memory.
+- The four setups were measured in shuffled order within the same session, so the comparisons between them are fairly safe. The two memory sizes, however, were run one after the other (24GB 15:30–16:47, 16GB 16:59–21:05), so the difference between them mixes the extra 8GB with any change in the other programs' load. The size of the stalls and the minutes-long 16GB results may have been affected.
+- Some records were not kept at measurement time: the macOS version, the package list (the versions above were read from the measurement environment afterwards), the exact code version, the transformers model revision, and the WikiText-2 dataset revision.
 
 ## License
 
-Code: MIT ([LICENSE](LICENSE)).
+Code: MIT ([LICENSE](LICENSE)). Data (`results/`), documents (README, `docs/`) and figures (`figures/`): [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) — free to use with attribution. Code examples inside the documents are MIT.

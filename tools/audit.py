@@ -19,7 +19,8 @@ Checks, per capacity level (rows are grouped by `ballast_gb`):
   6. Steady state   -- per-cell CV of step_ms_p50; a cell that swings across
                        repeats cannot support a single-summary conclusion
 
-Exits non-zero if any integrity check fails (sleep gaps, token counts), so it
+Exits non-zero if any integrity check fails (missing or short cells, sleep gaps,
+token counts), so it
 can gate an analysis step. The steady-state spread gate is reported separately:
 a cell that fails it is real data, but no single summary of it should carry a
 conclusion.
@@ -37,6 +38,10 @@ from collections import Counter, defaultdict
 
 CONFIGS = ("FP16", "NF4_4bit", "GGUF_F16", "GGUF_Q4_K_M")
 GAP_ALERT_S = 120
+# the experiment's fixed design: every level must contain every one of these cells
+EXPECTED_CONFIGS = ("FP16", "NF4_4bit", "GGUF_F16", "GGUF_Q4_K_M")
+EXPECTED_CTX = (128, 512, 1024, 2048, 4096)
+
 CV_WARN = 0.15      # steady-state spread worth flagging
 CV_FAIL = 0.50      # above this, no single summary of the cell is meaningful
 
@@ -45,18 +50,19 @@ def ts(s):
     return dt.datetime.fromisoformat(s)
 
 
-def audit(rows, label, repeats):
+def audit(rows, label, repeats, grid):
     """Return (n_failures, n_warnings) after printing a report for one level."""
     fails = warns = vfails = 0
     rows = sorted(rows, key=lambda r: r["started_at"] or "")
     print(f"\n{'=' * 74}\n{label} — {len(rows)} rows\n{'=' * 74}")
 
     cells = Counter((r["config"], r["context_len"]) for r in rows)
+    missing = sorted(set(grid) - set(cells), key=str)
     off = {k: v for k, v in sorted(cells.items(), key=str) if v != repeats}
-    status = "OK" if not off else "PARTIAL"
-    print(f"  [{status}] 완전성      {len(cells)} 셀, {repeats}회 아닌 셀: {off or '없음'}")
-    if off:
-        warns += 1
+    status = "OK" if not (off or missing) else "FAIL"
+    print(f"  [{status}] 완전성      {len(cells)}/{len(grid)} 셀, 빠진 셀: {missing or '없음'}, "
+          f"{repeats}회 아닌 셀: {off or '없음'}")
+    fails += bool(off or missing)
 
     if any(r.get("started_at") for r in rows):
         gaps = [
@@ -136,11 +142,15 @@ def main():
     rows = [json.loads(l) for l in open(args.path) if l.strip()]
     levels = sorted({r.get("ballast_gb") for r in rows}, key=lambda x: (x is not None, x))
 
+    # expected grid: the fixed design, plus anything else that appears in the file
+    configs = set(EXPECTED_CONFIGS) | {r["config"] for r in rows}
+    ctxs = set(EXPECTED_CTX) | {r["context_len"] for r in rows}
+    grid = sorted({(c, x) for c in configs for x in ctxs}, key=str)
     total_f = total_w = total_v = 0
     for lv in levels:
         sub = [r for r in rows if r.get("ballast_gb") == lv]
         label = "24GB (ballast 없음)" if lv in (None, 0.0) else f"ballast {lv}GB (= {24 - lv:.0f}GB 기계)"
-        f, w, v = audit(sub, label, args.repeats)
+        f, w, v = audit(sub, label, args.repeats, grid)
         total_f += f
         total_w += w
         total_v += v

@@ -1,131 +1,132 @@
-# 온디바이스 LLM 양자화 벤치마크 — Apple Silicon에서의 Qwen3-4B
+# 온디바이스 LLM 양자화 벤치마크 — MacBook에서 Qwen3-4B 비교
 
 [English](README.md)
 
-Apple M3 MacBook Air에서 `Qwen/Qwen3-4B-Instruct-2507`을 대상으로 **추론 engine × 가중치 정밀도**를 통제된 2×2 설계로 비교했습니다. 메모리 용량은 두 가지(24GB, 그리고 8GB를 고정(pinning)하여 모사한 16GB 머신)를 사용했습니다. 현재 데이터셋은 **감사(audit)를 마친 200회 실행**(4개 config × 5개 컨텍스트 길이 × 2개 용량 × 5회 반복)으로 구성됩니다. 모든 표와 그림은 원본 raw 행으로부터 명령어 하나로 다시 생성됩니다.
+MacBook Air(M3)에서 언어 모델 Qwen3-4B를 **실행 프로그램 2가지(transformers, llama.cpp) × 숫자 정밀도 2가지(16비트, 4비트)**로 돌려, 속도와 언어 모델 품질(WikiText-2 perplexity)을 비교한 개인 연구 기록입니다. 200번 측정한 원자료와 분석 코드를 함께 공개합니다.
 
-|  | HF transformers (PyTorch MPS) | llama.cpp (Metal) |
+> 결과를 자세히 풀어 쓴 설명은 [docs/details.ko.md](docs/details.ko.md)에, 모든 표를 담은 보고서는 [docs/full-report.ko.md](docs/full-report.ko.md)에, 측정 실수를 찾아 고쳐 온 과정은 [docs/measurement-history.ko.md](docs/measurement-history.ko.md)에 있습니다.
+
+## 핵심 결과
+
+아래 속도 비율은 토큰 하나를 만드는 보통 시간(생성한 150개 토큰의 중앙값)을 비교한 것이고, 입력 길이 5가지(128–4096 토큰)의 기하평균입니다. 괄호 안은 입력 길이별 범위입니다. 「결과」의 표는 128 토큰만 보여 주므로, 표의 숫자끼리 나누면 이 범위 안의 값 하나가 나옵니다.
+
+- **둘 다 4비트라고 부르지만 결과는 정반대였습니다.** 메모리 24GB에서 llama.cpp 4비트는 자기 16비트보다 2.58× 빨라졌고(2.35–2.84×), transformers 4비트는 오히려 2.48× 느려졌습니다(16비트 속도의 0.36–0.46×). 품질 손실도 llama.cpp 4비트가 더 작았습니다(perplexity +2.13% 대 +2.77%). 다만 두 4비트 방식은 세부 구성이 달라, 품질 차이의 일부는 그 때문으로 의심됩니다(「한계」 참고).
+- **"3.3배 빨라짐"의 대부분은 4비트 덕분입니다.** transformers 16비트에서 llama.cpp 4비트로 바꾸면 3.28× 빨라집니다(2.79–3.67×). 16비트에서 출발해 두 단계로 나눠 보면 프로그램 교체가 1.27×, 4비트 전환이 2.58×입니다. 입력 길이별로는 각각 1.16–1.49×, 2.35–2.84×입니다. 다만 4비트의 효과가 프로그램에 따라 달라서, 이 분해가 각 요인의 독립적인 기여를 뜻하지는 않습니다.
+- **transformers 16비트가 입력 2048 토큰에서 급격히 느려진 것은 대부분 드문 멈춤 때문이었습니다.** 메모리 24GB에서 1024 → 2048로 늘리면 평균 속도는 3.38× 느려졌지만, 토큰 하나의 보통 시간(중앙값)은 1.28×만 느려졌습니다. 150개 토큰 중 몇 개가 몇 초씩 멈췄기 때문입니다. 멈춤은 실제로 기다리는 시간이라, 평균(전체 대기시간)과 중앙값(보통 토큰의 지연)을 함께 봐야 합니다.
+- **메모리가 16GB로 줄면 차이가 분 단위로 벌어집니다.** 같은 작업(입력 2048 토큰, 150 토큰 생성)이 llama.cpp 4비트는 14초, transformers 16비트는 실행에 따라 4.4–7.7분 걸렸습니다. 이 transformers 결과는 반복마다 가장 크게 흔들렸으므로 범위로 읽어야 합니다.
+
+## 무엇을 비교했나
+
+|  | transformers | llama.cpp |
 |---|---|---|
-| **16-bit** | HF FP16 (baseline) | GGUF F16 |
-| **4-bit** | HF NF4 (bitsandbytes) | GGUF Q4_K_M (K-quant) |
+| **16비트** | transformers 16비트 (FP16) — 기준 | llama.cpp 16비트 (F16) |
+| **4비트** | transformers 4비트 (NF4) | llama.cpp 4비트 (Q4_K_M) |
 
-GGUF F16을 포함한 것은 두 효과를 분리하기 위해서입니다. "GGUF Q4_K_M 대 HF FP16"만 비교하면 engine과 정밀도가 동시에 바뀌기 때문입니다.
+- **transformers**: Hugging Face가 만든 파이썬 라이브러리입니다. 연구에서 모델을 돌릴 때 가장 흔히 씁니다.
+- **llama.cpp**: C/C++로 만든 가벼운 모델 실행 프로그램입니다. 노트북과 PC에서 많이 쓰고, 모델 파일 형식으로 GGUF를 씁니다.
+- **16비트(FP16 / F16)**: 숫자 하나를 16비트로 저장하는 원래 정밀도입니다. **4비트**는 가중치 대부분을 4비트로 줄여 저장하는 것(양자화)이고, transformers의 방식이 NF4, llama.cpp의 방식이 Q4_K_M입니다. 둘 다 전부 4비트는 아닙니다. Q4_K_M은 일부 가중치를 6비트로 남기고, NF4는 임베딩층과 출력층을 16비트로 둡니다.
+- **llama.cpp 16비트를 넣은 이유**: "transformers 16비트"와 "llama.cpp 4비트"만 비교하면 프로그램과 비트 수가 한꺼번에 바뀌어, 빨라진 이유가 어느 쪽 덕인지 알 수 없습니다. 가운데에 llama.cpp 16비트를 넣으면 두 효과를 따로 볼 수 있습니다.
+- **메모리 조건을 두 가지로 나눈 이유**: 가진 Mac은 24GB 한 대뿐인데, 많은 사람이 쓰는 16GB Mac에서는 어떻게 되는지도 보고 싶었습니다. 그래서 다른 프로그램이 8GB를 계속 붙잡게 해 모델이 쓸 수 있는 메모리를 줄였습니다. 같은 기계와 같은 측정 방법에서 의도한 차이는 8GB를 추가로 차지한 것뿐입니다. 또 Chrome과 Claude 앱은 일부러 켜 두었습니다. 작은 모델은 다른 프로그램과 함께 쓰일 때가 많다고 봤기 때문입니다. 다만 이 프로그램들을 얼마나 썼는지는 기록하지 않았습니다(「한계」 참고).
 
-## 주요 결과
+## 결과
 
-### 1. 같은 4-bit이 정반대 방향으로 움직입니다
+![Both called 4-bit, opposite directions](figures/fig1_same_4bit_opposite.png)
 
-![Same 4 bits, opposite directions](figures/fig1_same_4bit_opposite.png)
+입력 128 토큰, 메모리 24GB, 5회 측정의 중앙값입니다.
 
-각 engine의 16-bit 가중치를 기준으로 할 때, llama.cpp의 **K-quant는 2.58× 더 빠르게 동작**(컨텍스트 길이별 2.35–2.84×)하는 반면, bitsandbytes의 **NF4는 2.48× 더 느리게 동작**(0.36–0.46×)합니다. 품질 손실도 K-quant 쪽이 더 작습니다. WikiText-2 perplexity는 9.7446 대 9.8060이며, 16-bit baseline 대비 +2.13% 대 +2.77%입니다. 이 실험 격자 안에는 NF4가 더 나은 선택이 되는 추론 설정이 없습니다. 이는 이 저장소에서 가장 견고한 결과로, 모든 컨텍스트 길이와 두 용량 모두에서, 그리고 시도한 모든 추정량(estimator)에서 성립합니다.
-
-**순위를 결정하는 것은 가중치 크기가 아니라 커널 지원입니다.** HF NF4(가중치 2.9GB)는 두 용량 모두에서 GGUF F16(가중치 8GB)보다 약 **3.3× 느립니다**(컨텍스트 길이별 2.7–3.4×). K-quant는 dequantize와 matmul을 융합한 추론 커널을 사용하는 반면, NF4는 QLoRA *학습* 시 메모리를 절약하려는 목적으로 설계되었고 이에 상응하는 Metal 경로가 없기 때문일 가능성이 있습니다. 이는 커널 프로파일링이 아니라 아키텍처로부터 한 추론입니다.
-
-### 2. "3.3× 빠르다"는 대부분 engine이 아니라 양자화의 효과입니다
-
-| 24GB, steady-state 속도 비율 | 128 | 512 | 1024 | 2048 | 4096 | **기하평균** |
-|---|---|---|---|---|---|---|
-| Engine `GGUF-F16 / HF-FP16` | 1.16 | 1.22 | 1.30 | 1.49 | 1.19 | **1.27×** |
-| K-quant `Q4_K_M / GGUF-F16` | 2.84 | 2.70 | 2.60 | 2.46 | 2.35 | **2.58×** |
-| NF4 `HF-NF4 / HF-FP16` | 0.36 | 0.38 | 0.39 | 0.46 | 0.44 | **0.40×** |
-| 전체 `Q4_K_M / HF-FP16` | 3.30 | 3.29 | 3.40 | 3.67 | 2.79 | **3.28×** |
-
-전체 3.28×는 engine 효과 1.27×와 양자화 효과 2.58×로 분해됩니다. 그럼에도 engine은 다른 이유에서 여전히 중요합니다. 이 격자에서 4-bit이 실제로 이득이 되는 곳은 engine이 llama.cpp인 경우뿐이기 때문입니다(결과 1).
-
-### 3. 컨텍스트 길이의 "절벽(cliff)"은 네 개 버전에서 재현되었지만 그 원인은 지표였습니다
-
-![The 2048-token cliff was the metric](figures/fig2_cliff_was_metric.png)
-
-v3부터 v6까지 HF FP16의 throughput은 1024 토큰에서 2048 토큰 사이에 급락했다가 4096 토큰에서 일부 회복되었고, 이 양상은 매번 재현되었습니다. 모든 decode step을 기록해 보니 원인이 드러났습니다. `tokens_per_sec = tokens / total time`은 **평균**이므로, 150개 step 중 수 초씩 걸리는 몇 번의 stall이 값을 좌우합니다. 1024 토큰에서 2048 토큰으로 갈 때 평균 기반 비용은 **3.38×** 증가하지만, step별 median은 **1.28×** 증가합니다. KV cache를 미리 할당(`StaticCache`)하면 stall이 사라집니다. HF의 기본값인 `DynamicCache`는 매 step마다 cache를 재할당하며, HF FP16 생성은 한 번 수행할 때마다 드라이버의 메모리 사용량을 머신의 전체 24GB까지 끌어올립니다. 이 한계 부근에서 stall이 OS의 메모리 회수 때문에 발생한다는 해석은 probe 결과와 부합하지만 증명된 것은 아닙니다.
-
-이는 새로운 통찰이 아닙니다. 서빙 벤치마크에서 percentile 보고는 표준적인 관행이고(MLPerf Inference SingleStream은 p90을 사용합니다), Agrawal et al.(arXiv:2507.09019)과 *Etalon*(arXiv:2407.07000)은 생성 중 stall을 가리는 throughput 지표를 알려진 함정으로 지적하며, Mytkowicz et al.(ASPLOS '09)은 측정 편향이 어떻게 재현 가능한 잘못된 결론을 낳는지 보였습니다. 이 저장소가 기록하는 것은 이러한 관행이 아직 온디바이스 도구에는 도달하지 못했다는 점입니다. MLPerf Client는 평균 tokens/s를 보고하고, `llama-bench`는 반복 실행에 대한 평균 ± 표준편차를 보고합니다.
-
-### 4. 메모리 압박 아래에서는 격차가 분 단위로 벌어집니다
-
-16GB 머신에서 llama.cpp의 steady-state 속도는 전혀 반응하지 않습니다(20개 셀 모두에서 스톨 세금(stall tax) 1.0×). KV cache를 로드 시점에 한 번만 확보하고 가중치는 memory-map하기 때문입니다. 2048 토큰 프롬프트에서 150 토큰을 생성하는 데 HF FP16은 **약 7분**이 걸리며 그중 약 5분 44초가 stall 시간인 반면, llama.cpp Q4_K_M은 **14초**가 걸립니다. 메모리 압박이 위에서 본 NF4–F16 커널 격차를 만들어 내는 것은 아니며, stall을 통해 그 격차를 증폭시킵니다. (감사 결과, 16GB의 두 셀 FP16@2048과 NF4@4096은 반복 간 변동이 너무 커서 어떤 단일 요약값으로도 결론을 뒷받침할 수 없다고 표시되었습니다. 이 수치들은 예시로만 봐 주십시오.)
-
-## 수치 산출 방법
-
-- **Steady state = step별 decode latency p50**이며, 5회 반복에 대한 median을 취합니다. `tokens_per_sec`는 기록은 하지만 결론에는 사용하지 않습니다. 커널 비용과 stall이 섞여 있기 때문입니다.
-- **스톨 세금(stall tax)** = (1000 / step p50) ÷ 평균 tokens/s. 값이 1.0×이면 평균이 왜곡되지 않았다는 뜻입니다.
-- **비율은 다섯 개 컨텍스트 길이 전체에 대한 기하평균과 그 범위로 요약합니다.** 하나의 컨텍스트만 인용하는 것 자체가 추정량의 선택이 되기 때문입니다.
-- 실행 순서는 전역적으로 섞었습니다. 각 행에는 타임스탬프, swap 사용량, 고정(pinned) 메모리가 기록되므로 오염(sleep, swap 포화)을 사후에 확인할 수 있습니다. `tools/audit.py`가 분석 전에 통과해야 하는 관문입니다.
-- Perplexity: 네 개 config 모두 동일한 토큰 시퀀스(WikiText-2 test set 전체, 299,078 토큰)에 대해 동일한 함수로 점수를 매겼습니다. 서로 독립적인 두 F16 경로의 결과는 0.004% 이내로 일치합니다(9.5413 대 9.5417).
-
-ctx=128, 24GB, 5회 실행의 median 기준 주요 수치입니다(네 config 모두 스톨 세금이 1.0×이므로 여기서는 평균과 steady state가 일치합니다).
-
-| Config | 최대 메모리 (GB) | Decode tok/s | TTFT (s) | Perplexity |
+| 방식 | 최대 메모리 (GiB) | 생성 속도 (토큰/초) | 첫 토큰까지 (초) | perplexity (낮을수록 좋음) |
 |---|---|---|---|---|
-| HF FP16 (baseline) | 7.54 | 9.74 | 0.48 | 9.5413 |
-| HF NF4 (bitsandbytes) | 2.88 | 3.48 | 0.67 | 9.8060 |
-| GGUF F16 | –\* | 11.31 | 0.43 | 9.5417 |
-| GGUF Q4_K_M | –\* | 31.92 | 0.46 | 9.7446 |
+| transformers 16비트 (FP16), 기준 | 7.54 | 9.74 | 0.48 | 9.5413 |
+| transformers 4비트 (NF4) | 2.88 | 3.48 | 0.67 | 9.8060 |
+| llama.cpp 16비트 (F16) | –\* | 11.31 | 0.43 | 9.5417 |
+| llama.cpp 4비트 (Q4_K_M) | –\* | 31.92 | 0.46 | 9.7446 |
 
-\* llama.cpp는 torch 방식의 메모리 API를 제공하지 않아 측정하지 못했습니다.
+\* llama.cpp는 PyTorch식 메모리 측정 기능이 없어 재지 못했습니다.
 
-## 측정 기록
+![The 2048-token cliff came mostly from rare stalls](figures/fig2_cliff_was_metric.png)
 
-현재 결과는 여덟 번째 버전입니다. v1–v8에 걸쳐 여섯 가지 측정 결함을 발견해 수정했으며, 각각이 결론을 바꾼 바 있습니다.
+입력 길이별 비교, 메모리 16GB 결과, 멈춤이 왜 생기는지에 대한 진단 실험은 [docs/details.ko.md](docs/details.ko.md)에 있습니다.
 
-1. **Prefill 이중 수행** — `generate()`가 두 번 호출되어 prefill이 decode throughput에 섞여 들어갔습니다.
-2. **비동기 타이밍** — MPS에서 `time.time()`은 GPU가 작업을 끝낸 시점이 아니라 CPU가 작업을 발행한 시점을 가리켰고, 이 때문에 prefill이 다시 섞여 들어갔습니다.
-3. **Sleep 오염** — 8시간짜리 실행 한 번에서 6시간이 sleep 상태였습니다. 이제 모든 실행에 `caffeinate -i`를 사용하고 타임스탬프를 기록합니다.
-4. **반복 블록 순서** — 반복을 블록 단위로 실행하면 모든 median이 21–25% 편향되었고, 전역 shuffle로 이를 ±4%까지 줄였습니다.
-5. **지표** — 평균이 stall을 가렸습니다(결과 3).
-6. **추정량** — "오염을 제거"하려고 반복 실행의 최솟값을 취한 것이 정작 그 비교 자체를 편향시켰고, 네 개의 주장을 철회했습니다.
+## 실험 환경
 
-각 대안 설명을 배제한 probe를 포함한 전체 기록은 [docs/measurement-history.ko.md](docs/measurement-history.ko.md)에 있습니다. 16GB 및 메모리 압박 실험을 포함한 모든 표는 [docs/full-report.ko.md](docs/full-report.ko.md)에 있습니다. 추정량 편향은 [docs/estimator-bias-note.ko.md](docs/estimator-bias-note.ko.md)에 정리했습니다. 이전 버전의 raw 데이터는 감사 추적(audit trail)으로 `results/archive/`에 보관합니다.
+| 항목 | 내용 |
+|---|---|
+| 기기 | MacBook Air (Apple M3, CPU 8코어 · GPU 10코어) |
+| 메모리 | 24GB 통합 메모리(대역폭 100GB/s). 16GB 조건은 8GB를 다른 프로그램이 차지해 흉내 냄 |
+| 함께 실행된 프로그램 | Chrome, Claude 앱. 일상 사용 환경에 가깝게 일부러 켜 둠. 메모리·CPU 사용량은 기록되지 않음 |
+| 실행 환경 | transformers: PyTorch MPS · llama.cpp: Metal 빌드 |
+| 소프트웨어 | Python 3.12, torch 2.13.0, transformers 5.14.1, bitsandbytes 0.50.0, accelerate 1.14.0, llama-cpp-python 0.3.34, datasets 5.0.1, numpy 2.5.1. 측정에 쓴 가상환경에서 나중에 읽은 버전입니다. 전체 목록: [environment/requirements-measured.txt](environment/requirements-measured.txt) |
+| 모델 | transformers: `Qwen/Qwen3-4B-Instruct-2507` · llama.cpp: `unsloth/Qwen3-4B-Instruct-2507-GGUF`의 F16·Q4_K_M 파일(판본과 파일 해시: [environment/model-files.txt](environment/model-files.txt)) |
+| 측정 코드 | v6 커밋(`b3a161c`) 이후의 작업본. 같은 계측 코드는 다음 날 `b3b9c33`으로 커밋 |
+| 측정 | 2026-08-09. 4가지 방식 × 입력 길이 5가지(128–4096 토큰) × 메모리 2가지 × 5회 = 200회. 측정마다 150 토큰 생성, 측정 순서는 메모리 조건마다 무작위 |
+| 품질 측정 | WikiText-2 테스트 세트 전체(299,078 토큰)의 perplexity. 답변의 정확도나 지시 수행 능력은 평가하지 않았습니다 |
 
 ## 재현 방법
 
-위의 모든 수치를 측정한 경로인 Apple Silicon(MPS / Metal) 기준입니다.
+GPU 없이도 저장소에 있는 원자료로 속도 표와 그림 두 장을 다시 만들고, README의 핵심 숫자를 원자료와 대조할 수 있습니다. 몇 초면 끝나고 Python 3과 matplotlib만 있으면 됩니다.
 
 ```bash
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-CMAKE_ARGS="-DGGML_METAL=on" pip install --no-cache-dir --force-reinstall llama-cpp-python
-
-# caffeinate -i is required: sleep silently corrupts wall-clock timing
-caffeinate -i python benchmark_quantization.py --stage context_sweep --repeats 5                  # 24GB
-caffeinate -i python benchmark_quantization.py --stage context_sweep --repeats 5 --ballast-gb 8   # 16GB
-python benchmark_quantization.py --stage perplexity
-
-python tools/audit.py --repeats 5   # integrity gate
-python tools/analyze.py             # regenerates every table from results/results.jsonl
-python tools/figures.py             # regenerates the two figures
+python tools/audit.py --repeats 5   # check the data (sleep gaps, missing runs, variance)
+python tools/analyze.py             # speed tables
+python tools/figures.py             # the two figures
+python tools/claims.py --check      # key README numbers, checked sentence by sentence against the raw data
 ```
 
-**더 큰 머신에서는 stall 결과가 나타나지 않으며, 이는 예상된 동작입니다.** stall은 HF가 메모리를 머신의 물리적 한계까지 끌어올리기 때문에 발생합니다. 64GB 이상에서는 모든 곳에서 스톨 세금이 1.0×가 되어, 결과 1과 2(커널과 정밀도)는 재현되지만 결과 3과 4(stall)는 사라집니다. 압박 조건을 재현하려면 `--ballast-gb`로 메모리를 고정하여 유효 용량이 24GB 또는 16GB가 되도록 하십시오(64GB 머신에서는 `40`과 `48`).
+Apple Silicon Mac에서 처음부터 다시 측정하는 방법(원래 측정은 24GB 약 1.3시간, 16GB 약 4.1시간)은 [docs/reproduce.ko.md](docs/reproduce.ko.md)에 있습니다.
 
-## 저장소 구조
+## 저장소 구성
 
 ```
-benchmark_quantization.py   # the sweep: context_sweep and perplexity stages
+benchmark_quantization.py   # the benchmark: context_sweep and perplexity stages
 tools/
-  audit.py                  # integrity gate: sleep gaps, incomplete cells, token counts, per-cell variance
-  analyze.py                # regenerates every table from results/results.jsonl
-  figures.py                # regenerates the README figures
-  cliff_probe.py            # stall diagnostics (prompt, SDPA backend, per-step, cache, allocator, residue)
-  output_agreement.py       # where the four configs' greedy outputs diverge
-  ballast.py, pressure_probe.py   # memory-capacity simulation and mmap on/off A/B
-results/
-  results.jsonl             # 200 audited rows (current data)
+  audit.py                  # data check: sleep gaps, missing or short runs, token counts, variance
+  analyze.py                # speed tables from results/results.jsonl
+  figures.py                # the README figures
+  claims.py                 # every README number with its source; --check compares it with the docs
+  cliff_probe.py            # diagnostic tests for the stalls
+  output_agreement.py       # where the four setups' outputs start to differ
+  ballast.py, pressure_probe.py   # holding memory to imitate a smaller Mac; mmap on/off test
+results/                    # raw data (see results/README.md for every field)
+  results.jsonl             # 200 audited measurements (current data)
   results_perplexity_v7.jsonl
   results_memory_pressure.jsonl
-  probe_*.log               # saved probe outputs behind the causal claims
-  archive/                  # data from superseded versions, kept as an audit trail
-docs/                       # full report, measurement history, estimator note (Korean)
+  probe_*.log               # saved outputs of the diagnostic tests
+  archive/                  # data from older, superseded versions
+docs/
+  details.md, details.ko.md # README results explained in detail
+  reproduce.md, reproduce.ko.md # how to measure again from scratch
+  full-report.ko.md         # every table (Korean)
+  measurement-history.ko.md # measurement mistakes found and fixed (Korean)
+  estimator-bias-note.ko.md # why "pick the fastest run" was biased (Korean)
 figures/
 ```
 
+원자료의 각 항목(필드)이 무엇을 뜻하는지는 [results/README.md](results/README.md)에 있습니다.
+
+## 측정 기록
+
+이 저장소는 v1부터 v8까지 여러 판본을 거쳤고, 지금 데이터는 v7(2026-08-09)에서 잰 것입니다. 그동안 측정 실수 여섯 가지가 발견되어 고쳐졌습니다. 그중 여러 개는 AI의 독립 검토가 찾았고, 어떤 지적을 받아들이고 무엇을 철회할지는 본인이 판단했습니다. 입력 처리 시간이 생성 속도에 섞인 것, GPU 시간을 잘못된 시점에 잰 것, 측정 중 컴퓨터가 잠든 것, 같은 설정을 몰아서 반복해 생긴 치우침, 평균이 멈춤을 가린 것, 반복 중 가장 빠른 값을 골라 생긴 치우침입니다. 각각 어떻게 찾고 고쳤는지는 [docs/measurement-history.ko.md](docs/measurement-history.ko.md)에 있습니다.
+
+## 역할 분담
+
+- **본인**: 연구 질문 설정, AI가 제안한 실험 설계(엔진 × 정밀도 2×2)의 채택, 메모리 조건(24GB와 16GB 흉내) 설계, 실험이 잘못된 방향으로 갈 때 중단하고 되돌리기, 근거가 부족한 주장의 철회와 공개 범위의 최종 판단
+- **AI 코딩 도구(Claude, Codex)**: 실험 조사와 계획 초안, 측정·분석 코드 작성, 문서 초안 작성, 원자료 재계산
+- **AI 검토**: 측정 결함과 과장된 표현을 찾는 독립 검토. 어떤 지적을 받아들일지는 본인이 결정
+
 ## 한계
 
-- **Apple Silicon 통합 메모리(unified memory)에 한정됩니다.** CUDA 교차 검증은 v1(결함이 있던) 프로토콜에서만 존재하며 제외했습니다. mmap의 이점이 VRAM이 분리된 GPU에서도 유지되는지는 검증하지 못했습니다.
-- **모델은 하나이며, 그 크기는 설계에 의해 정해졌습니다.** 16-bit 구성이 16GB에 들어가야 하므로 4B가 사용 가능한 가장 큰 크기입니다. 이 실험은 요인 분해이며, 16GB Mac에서 무엇을 실행해야 하는지에 대한 권고가 아닙니다.
-- **End-to-end 타이밍이며 커널 프로파일링이 아닙니다.** 결과 1의 NF4에 대한 설명은 추론입니다.
-- **n = 5.** 컨텍스트 길이가 두 정밀도에서 토큰당 동일한 절대 비용을 추가하는지와 같은 일부 비교는 roofline 예측과 부합하지만, bootstrap 구간이 너무 넓어 두 값이 같다고 판단할 수는 없습니다. 어떤 쌍이 미결정인지는 전체 보고서에 표시했습니다.
-- **16GB 머신은 모사한 것입니다.** 24GB M3에서 상주 메모리를 고정하여 만들었으며, 메모리 대역폭과 코어 수는 같지만 완전히 동일하지는 않습니다.
+- Apple Silicon 한 기기(MacBook Air M3)에서만 쟀습니다. 메모리가 따로 있는 GPU에서도 같은지는 확인하지 않았습니다.
+- 모델은 하나(Qwen3-4B)입니다. 16비트 버전이 16GB에 들어가야 해서 4B를 골랐습니다. 16GB Mac에서 무엇을 쓰라는 추천이 아니라, 원인을 나눠 보는 실험입니다.
+- 전체 시간을 쟀고 GPU 코드 단위로 분석하지는 않았습니다. transformers 4비트가 느린 이유는 추정입니다.
+- 반복은 5회이고 진단 실험은 설정당 1–2회입니다. 일부 비교는 이 횟수로는 판단할 수 없습니다(상세 설명에 표시).
+- 두 "4비트" 방식은 가중치 하나당 비트 수가 같지 않습니다. Q4_K_M은 일부 가중치를 6비트로 남기고, NF4는 임베딩층과 출력층을 16비트로 둡니다. 가중치당 평균 비트 수는 재지 않았습니다. 이 차이는 품질 차이(+2.13% 대 +2.77%)의 일부 원인으로 의심됩니다. 다만 속도 차이의 주된 원인일 가능성은 낮습니다. transformers 4비트는 비트를 훨씬 많이 쓰는 llama.cpp 16비트보다도 느렸기 때문입니다(상세 설명 참고).
+- llama.cpp 쪽은 스트리밍으로 받은 조각 하나를 토큰 하나로 셌습니다. 조각 하나에 토큰이 여러 개 들어갈 수 있어서, transformers의 토큰 단위와 정확히 같다는 보장은 없습니다(실제로 llama.cpp 측정 30회는 150개가 아니라 149개로 세어졌습니다).
+- 16GB 조건은 24GB 기기에서 메모리를 일부 차지해 흉내 낸 것으로, 실제 16GB Mac과 완전히 같지는 않습니다.
+- llama.cpp 4비트 파일이 품질 보정용 데이터(importance matrix)로 만들어졌는지 확인하지 못했습니다. 그렇다면 perplexity 비교에서 유리했을 수 있습니다.
+- 측정 중 Chrome과 Claude 앱을 일부러 켜 두었지만, 얼마나 쓰였고 메모리를 얼마나 차지했는지는 기록하지 않았습니다. 첫 측정 직후 이미 스왑(메모리가 모자라 디스크로 밀려난 양)이 4.46GB(24GB 조건), 5.74GB(16GB 조건)였으므로, 모델이 실제로 쓸 수 있던 메모리는 24GB·16GB보다 적었을 가능성이 큽니다. 즉 두 조건은 정확한 사용 가능 메모리가 아니라 "24GB 기기 그대로"와 "거기서 8GB를 추가로 차지한 상태"입니다.
+- 네 방식은 같은 시간대에 무작위 순서로 측정해 서로 비교한 결과는 비교적 안전합니다. 하지만 두 메모리 조건은 차례로 측정했습니다(24GB 15:30–16:47, 16GB 16:59–21:05). 그래서 두 조건의 차이에는 8GB를 추가로 차지한 효과와 다른 프로그램의 부하 변화가 섞여 있습니다. 멈춤의 크기와 16GB 조건의 분 단위 결과는 이 영향을 받았을 수 있습니다.
+- 측정 당시 기록하지 않은 정보가 있습니다. macOS 버전, 패키지 목록(위 버전은 측정 환경에서 나중에 읽은 것), 정확한 코드 판본, transformers 모델 판본, WikiText-2 데이터셋 판본입니다.
 
 ## 라이선스
 
-코드: MIT ([LICENSE](LICENSE)).
+코드는 MIT([LICENSE](LICENSE))입니다. 데이터(`results/`), 문서(README, `docs/`), 그림(`figures/`)은 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)으로, 출처를 밝히면 자유롭게 쓸 수 있습니다. 문서 안의 코드 예시는 MIT를 따릅니다.

@@ -10,7 +10,7 @@ Compares four configs for Qwen3-4B-Instruct-2507:
   - GGUF Q4_K_M      (llama.cpp)          } the quantization effect from the engine
 
 on three axes: peak VRAM (HF only), decode speed (tokens/sec) + TTFT, and
-WikiText-2 perplexity (HF only). It also sweeps prompt length 128..4096.
+WikiText-2 perplexity (all four configs, same scorer). It also sweeps prompt length 128..4096.
 
 Measurement protocol (v3 -- rewritten after external peer review found the v2
 timing was still wrong):
@@ -328,8 +328,8 @@ def step_stats(timestamps):
     not the kernel. p50 is the steady-state cost (what a kernel comparison
     wants); the gap between 1000/p50 and tokens_per_sec is the stall tax (what
     a user actually waits through). Recording both is what makes the FP16
-    @2048 "cliff" auditable instead of arguable: the cliff lives entirely in
-    the mean, p50 is smooth in context length.
+    @2048 "cliff" auditable instead of arguable: most of the cliff lives in
+    the mean; p50 rises far less with context length.
     """
     gaps = [(b - a) * 1000 for a, b in zip(timestamps, timestamps[1:])]
     if not gaps:
@@ -648,12 +648,21 @@ def main():
                         help="Cap the perplexity corpus (for quick checks; "
                              "full WikiText-2 test takes hours across 4 configs)")
     parser.add_argument(
+        "--out", default=str(RESULTS_DIR),
+        help="Folder for the result files (default: results/, the audited data). "
+             "Use a separate folder for test runs, e.g. --out results/smoke, "
+             "so they are not appended to the audited results.jsonl.")
+    parser.add_argument(
         "--ballast-gb", type=float, default=0.0,
         help="Hold this much resident memory for the whole run to benchmark a "
              "smaller machine class than the host (on this 24GB M3 Air, 8 "
              "simulates a 16GB Mac and 16 an 8GB one). Recorded per row.",
     )
     args = parser.parse_args()
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sweep_path = out_dir / "results.jsonl"
+    ppl_path = out_dir / "results_perplexity_v7.jsonl"
 
     ballast = start_ballast(args.ballast_gb)
     if ballast is not None:
@@ -663,13 +672,13 @@ def main():
     try:
         if args.stage == "all":
             run_sweep(ALL_CONFIGS, [None], repeats=args.repeats,
-                      ballast_gb=args.ballast_gb or None)
-            run_perplexity(max_tokens=args.ppl_max_tokens)
+                      results_path=sweep_path, ballast_gb=args.ballast_gb or None)
+            run_perplexity(results_path=ppl_path, max_tokens=args.ppl_max_tokens)
         elif args.stage == "context_sweep":
             run_sweep(ALL_CONFIGS, CONTEXT_LENGTHS, repeats=args.repeats,
-                      ballast_gb=args.ballast_gb or None)
+                      results_path=sweep_path, ballast_gb=args.ballast_gb or None)
         elif args.stage == "perplexity":
-            run_perplexity(max_tokens=args.ppl_max_tokens)
+            run_perplexity(results_path=ppl_path, max_tokens=args.ppl_max_tokens)
     except torch.cuda.OutOfMemoryError:
         print(
             "CUDA out of memory. Try smaller MAX_NEW_TOKENS or a shorter "
