@@ -182,7 +182,7 @@ def fig_overview(out):
     t(fx, 4.0, f"llama.cpp 4-bit: {c['kquant_gm_24GB']} faster ({c['kquant_range_24GB']})",
       size=9.5, color=BLUE)
     t(fx, 3.72, f"transformers 4-bit: {c['nf4_slower_24GB']} slower", size=9.5, color=ORANGE)
-    t(fx, 3.44, f"Perplexity loss: {c['ppl_q4_vs_f16']} vs {c['ppl_nf4_vs_fp16']}", size=9.5)
+    t(fx, 3.44, f"Perplexity increase vs 16-bit: {c['ppl_q4_vs_f16']} vs {c['ppl_nf4_vs_fp16']}", size=9.5)
     t(fx, 2.85, "2048-token slowdown: mostly rare stalls", size=9.5, weight="bold")
     t(fx, 2.55, f"transformers 16-bit, 1024 \u2192 2048 tokens:", size=9.5)
     t(fx, 2.27, f"mean {c['cliff_mean_v7']} slower, median only {c['cliff_p50_v7']}", size=9.5)
