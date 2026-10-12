@@ -4,6 +4,8 @@
 
 MacBook Air(M3)에서 언어 모델 Qwen3-4B를 **실행 프로그램 2가지(transformers, llama.cpp) × 숫자 정밀도 2가지(16비트, 4비트)**로 돌려, 속도와 언어 모델 품질(WikiText-2 perplexity)을 비교한 개인 연구 기록입니다. 200번 측정한 원자료와 분석 코드를 함께 공개합니다.
 
+![Overview: design, data pipeline and key findings](figures/fig0_overview.png)
+
 > 결과를 자세히 풀어 쓴 설명은 [docs/details.ko.md](docs/details.ko.md)에, 모든 표를 담은 보고서는 [docs/full-report.ko.md](docs/full-report.ko.md)에, 측정 실수를 찾아 고쳐 온 과정은 [docs/measurement-history.ko.md](docs/measurement-history.ko.md)에 있습니다.
 
 ## 핵심 결과
@@ -81,7 +83,7 @@ benchmark_quantization.py   # the benchmark: context_sweep and perplexity stages
 tools/
   audit.py                  # data check: sleep gaps, missing or short runs, token counts, variance
   analyze.py                # speed tables from results/results.jsonl
-  figures.py                # the README figures
+  figures.py                # the README figures (overview numbers come from claims.py)
   claims.py                 # every README number with its source; --check compares it with the docs
   cliff_probe.py            # diagnostic tests for the stalls
   output_agreement.py       # where the four setups' outputs start to differ

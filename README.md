@@ -4,6 +4,8 @@
 
 A personal study comparing the speed and language-modeling quality (WikiText-2 perplexity) of the language model Qwen3-4B on a MacBook Air (M3), run with **2 programs (transformers, llama.cpp) × 2 number precisions (16-bit, 4-bit)**. The raw data from 200 measurements and the analysis code are included.
 
+![Overview: design, data pipeline and key findings](figures/fig0_overview.png)
+
 > A fuller explanation of the results is in [docs/details.md](docs/details.md). Every table ([docs/full-report.ko.md](docs/full-report.ko.md)) and the history of measurement mistakes found and fixed ([docs/measurement-history.ko.md](docs/measurement-history.ko.md)) are in Korean.
 
 ## Takeaways
@@ -81,7 +83,7 @@ benchmark_quantization.py   # the benchmark: context_sweep and perplexity stages
 tools/
   audit.py                  # data check: sleep gaps, missing or short runs, token counts, variance
   analyze.py                # speed tables from results/results.jsonl
-  figures.py                # the README figures
+  figures.py                # the README figures (overview numbers come from claims.py)
   claims.py                 # every README number with its source; --check compares it with the docs
   cliff_probe.py            # diagnostic tests for the stalls
   output_agreement.py       # where the four setups' outputs start to differ
