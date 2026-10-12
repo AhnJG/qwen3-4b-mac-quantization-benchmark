@@ -111,9 +111,9 @@ The repository went through versions v1 to v8; the current data was measured in 
 
 ## Roles
 
-- **Me**: setting the research question, adopting the experiment design proposed by AI (2×2 engine × precision), designing the memory conditions (24GB and an imitated 16GB), stopping and rolling back experiments that went in the wrong direction, and the final decisions on retracting weakly supported claims and on what to publish
+- **Me**: setting the research question, adopting the experiment design proposed by AI (2×2 engine × precision), choosing the memory conditions (24GB, and 16GB imitated by holding 8GB; the memory-holding method itself was suggested in AI review), running the measurements on my own Mac with everyday apps left open on purpose, stopping and rolling back experiments that went in the wrong direction, and the final decisions on retracting weakly supported claims and on what to publish
 - **AI coding tools (Claude, Codex)**: drafting the background research and plan, writing the measurement and analysis code, drafting documents, recomputing numbers from the raw data
-- **AI review**: independent reviews looking for measurement defects and overstated wording; I decided which findings to accept
+- **AI review**: independent reviews looking for measurement defects and overstated wording. Several design changes (the 2×2 grid, the memory-holding and mmap controls) and the defects behind the retractions came from these reviews; I decided which findings to accept
 
 ## Limitations
 
