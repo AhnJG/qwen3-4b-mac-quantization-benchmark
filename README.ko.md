@@ -97,6 +97,7 @@ results/                    # raw data (see results/README.md for every field)
 docs/
   details.md, details.ko.md # README results explained in detail
   reproduce.md, reproduce.ko.md # how to measure again from scratch
+  ai-lessons.md, ai-lessons.ko.md # mistakes from how AI was used, and what changed
   full-report.ko.md         # every table (Korean)
   measurement-history.ko.md # measurement mistakes found and fixed (Korean)
   estimator-bias-note.ko.md # why "pick the fastest run" was biased (Korean)
@@ -107,7 +108,7 @@ figures/
 
 ## 측정 기록
 
-이 저장소는 v1부터 v8까지 여러 판본을 거쳤고, 지금 데이터는 v7(2026-08-09)에서 잰 것입니다. 그동안 측정 실수 여섯 가지가 발견되어 고쳐졌습니다. 그중 여러 개는 AI의 독립 검토가 찾았고, 어떤 지적을 받아들이고 무엇을 철회할지는 본인이 판단했습니다. 입력 처리 시간이 생성 속도에 섞인 것, GPU 시간을 잘못된 시점에 잰 것, 측정 중 컴퓨터가 잠든 것, 같은 설정을 몰아서 반복해 생긴 치우침, 평균이 멈춤을 가린 것, 반복 중 가장 빠른 값을 골라 생긴 치우침입니다. 각각 어떻게 찾고 고쳤는지는 [docs/measurement-history.ko.md](docs/measurement-history.ko.md)에 있습니다.
+이 저장소는 v1부터 v8까지 여러 판본을 거쳤고, 지금 데이터는 v7(2026-08-09)에서 잰 것입니다. 그동안 측정 실수 여섯 가지가 발견되어 고쳐졌습니다. 그중 여러 개는 AI의 독립 검토가 찾았고, 어떤 지적을 받아들이고 무엇을 철회할지는 본인이 판단했습니다. 입력 처리 시간이 생성 속도에 섞인 것, GPU 시간을 잘못된 시점에 잰 것, 측정 중 컴퓨터가 잠든 것, 같은 설정을 몰아서 반복해 생긴 치우침, 평균이 멈춤을 가린 것, 반복 중 가장 빠른 값을 골라 생긴 치우침입니다. 각각 어떻게 찾고 고쳤는지는 [docs/measurement-history.ko.md](docs/measurement-history.ko.md)에 있습니다. AI를 쓰다가 방향을 잘못 잡거나 측정·문서에서 실수한 사례와, 그 뒤 바꾼 작업 방식은 [docs/ai-lessons.ko.md](docs/ai-lessons.ko.md)에 모았습니다.
 
 ## 역할 분담
 

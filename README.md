@@ -97,6 +97,7 @@ results/                    # raw data (see results/README.md for every field)
 docs/
   details.md, details.ko.md # README results explained in detail
   reproduce.md, reproduce.ko.md # how to measure again from scratch
+  ai-lessons.md, ai-lessons.ko.md # mistakes from how AI was used, and what changed
   full-report.ko.md         # every table (Korean)
   measurement-history.ko.md # measurement mistakes found and fixed (Korean)
   estimator-bias-note.ko.md # why "pick the fastest run" was biased (Korean)
@@ -107,7 +108,7 @@ What each field in the raw data means is described in [results/README.md](result
 
 ## Measurement record
 
-The repository went through versions v1 to v8; the current data was measured in v7 (2026-08-09). Along the way six measurement mistakes were found and fixed, several of them by independent AI reviews; I decided which findings to accept and what to retract. The six were: input processing leaking into the generation speed, timing the GPU at the wrong moment, the computer sleeping mid-run, skew from repeating the same setup back-to-back, the average hiding stalls, and skew from picking the fastest of the repeats. How each was found and fixed is in [docs/measurement-history.ko.md](docs/measurement-history.ko.md) (Korean).
+The repository went through versions v1 to v8; the current data was measured in v7 (2026-08-09). Along the way six measurement mistakes were found and fixed, several of them by independent AI reviews; I decided which findings to accept and what to retract. The six were: input processing leaking into the generation speed, timing the GPU at the wrong moment, the computer sleeping mid-run, skew from repeating the same setup back-to-back, the average hiding stalls, and skew from picking the fastest of the repeats. How each was found and fixed is in [docs/measurement-history.ko.md](docs/measurement-history.ko.md) (Korean). Every case where my use of AI led to a wrong direction, a measurement mistake or a documentation error, and what I changed because of it, is collected in [docs/ai-lessons.md](docs/ai-lessons.md).
 
 ## Roles
 
