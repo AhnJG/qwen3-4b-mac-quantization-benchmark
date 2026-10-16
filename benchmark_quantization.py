@@ -57,6 +57,7 @@ import random
 import subprocess
 import sys
 import threading
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -448,8 +449,21 @@ def measure_gguf_generate(llm, prompt_str, max_new_tokens=MAX_NEW_TOKENS):
 
 
 def download_gguf(filename_hint: str) -> str:
-    from huggingface_hub import list_repo_files, hf_hub_download
+    """Path of the GGUF file whose name contains `filename_hint`.
 
+    Looks in the local Hugging Face cache first, so a run works offline
+    (HF_HUB_OFFLINE=1) and cannot silently pick up a newer upstream file; only
+    if nothing is cached does it ask the Hub and download."""
+    import glob
+    from huggingface_hub import constants
+    pattern = os.path.join(constants.HF_HUB_CACHE,
+                           "models--" + GGUF_REPO.replace("/", "--"), "snapshots", "*", "*.gguf")
+    cached = sorted(f for f in glob.glob(pattern)
+                    if filename_hint.lower() in os.path.basename(f).lower())
+    if cached:
+        return cached[0]
+
+    from huggingface_hub import list_repo_files, hf_hub_download
     files = list_repo_files(GGUF_REPO)
     candidates = [
         f for f in files
