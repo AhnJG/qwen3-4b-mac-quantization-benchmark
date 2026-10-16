@@ -50,7 +50,7 @@ def ts(s):
     return dt.datetime.fromisoformat(s)
 
 
-def audit(rows, label, repeats, grid):
+def audit(rows, label, repeats, grid, check_gaps=True):
     """Return (n_failures, n_warnings) after printing a report for one level."""
     fails = warns = vfails = 0
     rows = sorted(rows, key=lambda r: r["started_at"] or "")
@@ -70,10 +70,13 @@ def audit(rows, label, repeats, grid):
             for a, b in zip(rows, rows[1:])
         ]
         big = [g for g in gaps if g[2] > GAP_ALERT_S]
-        print(f"  [{'FAIL' if big else 'OK'}] 잠자기/중단  {GAP_ALERT_S}s 초과 공백 {len(big)}건")
-        for a, b, g in big[:5]:
-            print(f"           {a} → {b}  ({g / 60:.1f}분)")
-        fails += bool(big)
+        if check_gaps:
+            print(f"  [{'FAIL' if big else 'OK'}] 잠자기/중단  {GAP_ALERT_S}s 초과 공백 {len(big)}건")
+            for a, b, g in big[:5]:
+                print(f"           {a} → {b}  ({g / 60:.1f}분)")
+            fails += bool(big)
+        else:
+            print("  [--] 잠자기/중단  메모리 조건을 번갈아 돌린 파일이라 전체 행 기준으로 따로 검사")
 
         durs = sorted(
             (((ts(r["ended_at"]) - ts(r["started_at"])).total_seconds(), r) for r in rows),
@@ -137,20 +140,39 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path", nargs="?", default="results/results.jsonl")
     ap.add_argument("--repeats", type=int, default=5)
+    ap.add_argument("--configs", default=None,
+                    help="Comma-separated configs this run was designed to cover "
+                         "(default: the fixed four)")
+    ap.add_argument("--contexts", default=None,
+                    help="Comma-separated input lengths this run was designed to cover "
+                         "(default: the fixed five)")
+    ap.add_argument("--interleaved", action="store_true",
+                    help="Memory levels were alternated in one run: check sleep gaps "
+                         "across all rows in time order instead of within each level")
     args = ap.parse_args()
+    exp_cfg = tuple(args.configs.split(",")) if args.configs else EXPECTED_CONFIGS
+    exp_ctx = tuple(int(x) for x in args.contexts.split(",")) if args.contexts else EXPECTED_CTX
 
     rows = [json.loads(l) for l in open(args.path) if l.strip()]
     levels = sorted({r.get("ballast_gb") for r in rows}, key=lambda x: (x is not None, x))
 
     # expected grid: the fixed design, plus anything else that appears in the file
-    configs = set(EXPECTED_CONFIGS) | {r["config"] for r in rows}
-    ctxs = set(EXPECTED_CTX) | {r["context_len"] for r in rows}
+    configs = set(exp_cfg) | {r["config"] for r in rows}
+    ctxs = set(exp_ctx) | {r["context_len"] for r in rows}
     grid = sorted({(c, x) for c in configs for x in ctxs}, key=str)
     total_f = total_w = total_v = 0
+    if args.interleaved:
+        allr = sorted(rows, key=lambda r: r["started_at"] or "")
+        big = [(a["ended_at"], b["started_at"]) for a, b in zip(allr, allr[1:])
+               if (ts(b["started_at"]) - ts(a["ended_at"])).total_seconds() > GAP_ALERT_S]
+        print(f"[{'FAIL' if big else 'OK'}] 잠자기/중단 (전체 행)  {GAP_ALERT_S}s 초과 공백 {len(big)}건")
+        for a, b in big[:5]:
+            print(f"           {a} → {b}")
+        total_f += bool(big)
     for lv in levels:
         sub = [r for r in rows if r.get("ballast_gb") == lv]
         label = "24GB (ballast 없음)" if lv in (None, 0.0) else f"ballast {lv}GB (= {24 - lv:.0f}GB 기계)"
-        f, w, v = audit(sub, label, args.repeats, grid)
+        f, w, v = audit(sub, label, args.repeats, grid, check_gaps=not args.interleaved)
         total_f += f
         total_w += w
         total_v += v

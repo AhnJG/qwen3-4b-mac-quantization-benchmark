@@ -189,6 +189,11 @@ class BenchmarkResult:
     step_ms_max: Optional[float] = None      # is the mean, and they disagree
     step_ms: Optional[list] = None           # full per-step array (v8+)
     schema: Optional[str] = None             # rows without it predate step_ms
+    label: Optional[str] = None              # free-text run condition (v8.5+)
+    mem_free_gb_start: Optional[float] = None    # vm_stat free+inactive+speculative
+    mem_free_gb_end: Optional[float] = None
+    mem_compressed_gb_end: Optional[float] = None
+    memorystatus_level_end: Optional[int] = None  # sysctl kern.memorystatus_level (% free)
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -211,6 +216,34 @@ def swap_used_gb():
         return round(float(used[:-1]) / 1024, 2)
     except Exception:
         return None
+
+
+def mem_snapshot():
+    """Read-only memory snapshot (macOS `vm_stat` and `sysctl`). Returns a dict
+    of GB values and the kernel's free-memory percentage; None where unavailable.
+    Nothing here applies pressure -- it only reads counters."""
+    snap = dict(free_gb=None, compressed_gb=None, level=None)
+    try:
+        out = subprocess.check_output(["vm_stat"], text=True)
+        page = int(out.split("page size of")[1].split()[0])
+        pages = {}
+        for line in out.splitlines()[1:]:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                pages[k.strip()] = int(v.strip().rstrip("."))
+        free = sum(pages.get(k, 0) for k in
+                   ("Pages free", "Pages inactive", "Pages speculative"))
+        snap["free_gb"] = round(free * page / 1024**3, 2)
+        snap["compressed_gb"] = round(
+            pages.get("Pages occupied by compressor", 0) * page / 1024**3, 2)
+    except Exception:
+        pass
+    try:
+        snap["level"] = int(subprocess.check_output(
+            ["sysctl", "-n", "kern.memorystatus_level"], text=True).strip())
+    except Exception:
+        pass
+    return snap
 
 
 def total_ram_gb():
@@ -484,23 +517,26 @@ def measure_one(config, ctx_len, max_new_tokens=MAX_NEW_TOKENS, use_mmap=True):
 
 
 def run_sweep(configs, ctx_lens, repeats=3, max_new_tokens=MAX_NEW_TOKENS,
-              results_path=RESULTS_DIR / "results.jsonl", ballast_gb=None):
+              results_path=RESULTS_DIR / "results.jsonl", ballast_gb=None,
+              seed=1000, label=None):
     """Measure every (config, ctx) pair `repeats` times in one globally shuffled
     order, so that run-order drift (this machine saturates its memory over a
     multi-hour sweep) is spread across all cells rather than concentrated in the
     last repeat -- see the module docstring."""
     tasks = [(c, x, r) for r in range(repeats) for c in configs for x in ctx_lens]
-    random.Random(1000).shuffle(tasks)   # deterministic
+    random.Random(seed).shuffle(tasks)   # deterministic (default seed 1000 = v7 order)
     for config, ctx_len, r in tasks:
         if config in HF_CONFIGS and DEVICE_KIND == "cpu":
             print(f"[{config}] skipped (no GPU backend)")
             continue
         started_at = now_iso()
+        mem0 = mem_snapshot()
         try:
             row = measure_one(config, ctx_len, max_new_tokens)
         except Exception as e:
             print(f"[{config}] ctx={ctx_len} rep={r} failed: {e!r}. Skipping.")
             continue
+        mem1 = mem_snapshot()
         log_result(BenchmarkResult(
             config, ctx_len, row["peak_vram_gb"], row["ttft_s"], row["tokens_per_sec"],
             device=DEVICE_KIND, prompt_tokens=row["prompt_tokens"], n_new=row["n_new"],
@@ -509,7 +545,10 @@ def run_sweep(configs, ctx_lens, repeats=3, max_new_tokens=MAX_NEW_TOKENS,
             ballast_gb=ballast_gb,
             step_ms_p50=row["step_ms_p50"], step_ms_p90=row["step_ms_p90"],
             step_ms_max=row["step_ms_max"], step_ms=row.get("step_ms"),
-            schema="v8",
+            schema="v8.5", label=label,
+            mem_free_gb_start=mem0["free_gb"], mem_free_gb_end=mem1["free_gb"],
+            mem_compressed_gb_end=mem1["compressed_gb"],
+            memorystatus_level_end=mem1["level"],
         ), path=results_path)
 
 
@@ -658,7 +697,20 @@ def main():
              "smaller machine class than the host (on this 24GB M3 Air, 8 "
              "simulates a 16GB Mac and 16 an 8GB one). Recorded per row.",
     )
+    parser.add_argument("--configs", default=",".join(ALL_CONFIGS),
+                        help="Comma-separated subset of " + ",".join(ALL_CONFIGS))
+    parser.add_argument("--contexts", default=",".join(map(str, CONTEXT_LENGTHS)),
+                        help="Comma-separated input lengths for context_sweep")
+    parser.add_argument("--seed", type=int, default=1000,
+                        help="Shuffle seed for the task order (1000 = the v7 order)")
+    parser.add_argument("--label", default=None,
+                        help="Free-text run condition stored in every row, e.g. apps_closed")
     args = parser.parse_args()
+    configs = [c.strip() for c in args.configs.split(",") if c.strip()]
+    bad = [c for c in configs if c not in ALL_CONFIGS]
+    if bad:
+        parser.error(f"unknown config(s): {bad}")
+    ctx_lens = [int(x) for x in args.contexts.split(",") if x.strip()]
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     sweep_path = out_dir / "results.jsonl"
@@ -675,8 +727,9 @@ def main():
                       results_path=sweep_path, ballast_gb=args.ballast_gb or None)
             run_perplexity(results_path=ppl_path, max_tokens=args.ppl_max_tokens)
         elif args.stage == "context_sweep":
-            run_sweep(ALL_CONFIGS, CONTEXT_LENGTHS, repeats=args.repeats,
-                      results_path=sweep_path, ballast_gb=args.ballast_gb or None)
+            run_sweep(configs, ctx_lens, repeats=args.repeats,
+                      results_path=sweep_path, ballast_gb=args.ballast_gb or None,
+                      seed=args.seed, label=args.label)
         elif args.stage == "perplexity":
             run_perplexity(results_path=ppl_path, max_tokens=args.ppl_max_tokens)
     except torch.cuda.OutOfMemoryError:
